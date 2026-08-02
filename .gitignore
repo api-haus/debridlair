@@ -1,0 +1,12 @@
+# Secrets
+.env
+sync-state/
+
+# Runtime state / generated
+emby/
+prowlarr/
+library/
+rclone/
+
+__pycache__/
+*.pyc
