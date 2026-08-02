@@ -48,9 +48,17 @@ UI use Identify. Item GET by id is `/emby/Users/{uid}/Items/{id}`, not
   create/prune files to match Torbox. Change the script, then run it.
 - **Don't `DELETE /Library/VirtualFolders`** on this Emby build — it 500s.
 - Emby is pinned to 4.8.11 (4.9 scan regressions + StrmAssistant compat).
-- Emby's download is capped at 40 Mbit via `tc tbf` on its veth (see
-  `emby-throttle` in compose). The veth name changes when the emby container
-  is recreated — `docker compose up -d emby-throttle` re-applies the cap.
+- The **whole stack** shares one 40 Mbit download cap: a `tc tbf` on the
+  `br-debrid` bridge, applied by `emby-throttle` (`scripts/throttle.sh`,
+  `RATE`/`BRIDGE` env in compose). Re-apply with
+  `docker compose up -d emby-throttle`; check with
+  `tc -s qdisc show dev br-debrid`. Shaping the bridge rather than each veth
+  is deliberate — per-veth caps give every container its own 40 Mbit.
+- **Prefer `docker compose stop` over `down`.** `down` removes the rclone
+  container without unmounting, leaving a dead FUSE endpoint at `rclone/mnt`
+  that makes the next `up` fail with `transport endpoint is not connected` —
+  and clearing it needs root (`sudo umount -l rclone/mnt`). If you must
+  `down`, unmount first.
 - Only acquire content through `torbox_find.py` — it enforces the
   streamability limits that match the 40 Mbit cap (no remuxes; ≤12 GB per
   episode, ≤30 GB per movie, ≤80 GB per pack). Do not bypass with

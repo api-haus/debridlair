@@ -81,24 +81,22 @@ services:
       - ./prowlarr:/config
 
   emby-throttle:
-    image: docker:cli
+    image: alpine:3.20
     container_name: emby-throttle
     network_mode: host
     privileged: true
     restart: "no"
     depends_on:
       - emby
+      - torbox-mount
+      - prowlarr
+    environment:
+      RATE: 40mbit
+      BRIDGE: br-debrid
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-    # Cap the emby container's download bandwidth (egress of its veth) so
-    # background analysis can never saturate the link again. Tweak RATE here.
-    command: >
-      sh -c "apk add --no-cache iproute2 >/dev/null 2>&1;
-      sleep 8;
-      IFIDX=$$(docker exec emby cat /sys/class/net/eth0/iflink) &&
-      VETH=$$(grep -l \"^$$IFIDX$$\" /sys/class/net/veth*/ifindex | cut -d/ -f5) &&
-      tc qdisc replace dev $$VETH root tbf rate 40mbit burst 2mbit latency 400ms &&
-      echo \"throttled $$VETH to 40mbit\""
+      - ./scripts/throttle.sh:/throttle.sh:ro
+    # Shared cap for every container on the bridge. Tweak RATE above.
+    command: sh /throttle.sh
 
   emby:
     image: emby/embyserver:4.8.11.0
@@ -135,3 +133,10 @@ services:
       timeout: 10s
       retries: 3
       start_period: 60s
+
+networks:
+  # Fixed bridge name so the throttle has a stable device to shape.
+  default:
+    driver: bridge
+    driver_opts:
+      com.docker.network.bridge.name: br-debrid

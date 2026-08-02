@@ -11,7 +11,7 @@ native Skip Intro (intro/credits detection) working over STRM.
 | `emby` | `emby/embyserver:4.8.11.0` | Media server on `:8096` (`:8920` https). Config in `./emby`. HW transcoding via `/dev/dri` (VAAPI, Premiere) |
 | `torbox-sync` | `python:3.12-alpine` | Loop (15 min): sync Torbox downloads → `.strm` files, refresh Emby library, probe new items |
 | `prowlarr` | `linuxserver/prowlarr` | Indexer aggregation/search on `:9696` (config in `./prowlarr`) |
-| `emby-throttle` | `docker:cli` (one-shot) | Applies a `tc tbf` cap (40 Mbit, edit in compose) on emby's veth so background analysis can't saturate the link; re-runs on every `docker compose up` |
+| `emby-throttle` | `alpine` (one-shot) | Applies a `tc tbf` cap (`RATE`, default 40 Mbit) on the `br-debrid` bridge — **one shared budget for every container**, not 40 Mbit each. Re-runs on every `docker compose up` |
 
 ## Libraries
 
@@ -93,6 +93,7 @@ and the TV dedupe prefers copies without dub-only language tags.
 ## Rebuild from scratch
 
 ```bash
+cp .env.example .env          # fill in; obscured pass = rclone obscure "$TORBOX_PASSWORD"
 docker compose up -d
 python3 scripts/torbox_sync.py
 python3 scripts/emby_setup.py
@@ -102,6 +103,26 @@ python3 scripts/emby_probe.py # initial probe pass (optional, sync loop does it)
 
 Then in Emby dashboard run *Extract Intro Fingerprint* (Strm Assistant)
 and *Detect Episode Intros* — or wait for their schedules.
+
+**Host prerequisites:** Docker + `/dev/fuse`; a VAAPI-capable `/dev/dri` (or
+drop the `devices:` entry from `emby`); the parent of this directory must be a
+**shared** mount (`findmnt -no PROPAGATION .`) or emby's `rshared` bind fails.
+
+**Not reproduced by these scripts — do these by hand on a fresh box:**
+
+1. **Prowlarr indexers.** `torbox_find.py` reads the API key out of
+   `prowlarr/config.xml` (auto-generated), but the indexers themselves live in
+   `prowlarr/prowlarr.db`, which is not committed. Add Knaben, The Pirate Bay,
+   LimeTorrents and Nyaa.si in the Prowlarr UI (`:9696`) or the finder returns
+   nothing.
+2. **Audio/subtitle policy.** Set `PlayDefaultAudioTrack=false` and
+   always-on English subtitles on the Emby user — the original-audio policy is
+   enforced at acquisition time by `torbox_find.py`, but playback defaults are
+   a UI setting.
+3. **Host-specific compose values.** `GIDLIST` is this box's render/video group
+   IDs (`getent group render video`); the `/mnt/archive4/strm-extra/anime` bind
+   and its matching Anime library in `emby_setup.py:236` are local to this
+   machine — drop both if that path doesn't exist.
 
 ## Notes / gotchas encountered
 
