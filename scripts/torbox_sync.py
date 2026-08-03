@@ -29,9 +29,11 @@ DOT_EP_PAT = re.compile(r"^(\d{1,2})\.(\d{1,3})(\s*-\s*|\s+)")
 EP_TOKEN = re.compile(r"[sS](\d{1,4})[eE][pP]?(\d{1,4})")
 # 7x01 style
 X_TOKEN = re.compile(r"\b(\d{1,2})x(\d{1,3})\b")
-# Anime-style absolute numbering: "[Group] Show Name - 03 [1080p...]"
+# Anime-style absolute numbering: "[Group] Show Name - 03 [1080p...]" or
+# "Show Name - E03 v2 [1080p...]" (literal E prefix, optional version tag)
 ANIME_EP = re.compile(r"^(?:\[[^\]]*\]\s*)*(?P<show>.+?)\s*-\s*"
-                      r"(?P<ep>\d{2,3})(?:\s*-\s*\d{2,3})?\s*(?:[\[\(]|$)")
+                      r"[eE]?(?P<ep>\d{2,3})(?:\s*-\s*\d{2,3})?"
+                      r"(?:\s*v\d+)?\s*(?:[\[\(]|$)")
 # Dot-separated absolute numbering with no dash: "Show.Name.53.v2.1080p..."
 ANIME_EP_DOT = re.compile(
     r"^(?P<show>.+?)\.(?P<ep>\d{2,3})(?:\.v\d+)?(?=\.(?:2160p|1080p|720p|480p|"
