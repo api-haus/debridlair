@@ -32,6 +32,10 @@ X_TOKEN = re.compile(r"\b(\d{1,2})x(\d{1,3})\b")
 # Anime-style absolute numbering: "[Group] Show Name - 03 [1080p...]"
 ANIME_EP = re.compile(r"^(?:\[[^\]]*\]\s*)*(?P<show>.+?)\s*-\s*"
                       r"(?P<ep>\d{2,3})(?:\s*-\s*\d{2,3})?\s*(?:[\[\(]|$)")
+# Dot-separated absolute numbering with no dash: "Show.Name.53.v2.1080p..."
+ANIME_EP_DOT = re.compile(
+    r"^(?P<show>.+?)\.(?P<ep>\d{2,3})(?:\.v\d+)?(?=\.(?:2160p|1080p|720p|480p|"
+    r"bluray|brrip|bdrip|web-?dl|hdtv|x26[45]|h\.?26[45]|hevc)\b)", re.I)
 ANIME_SEASON = re.compile(r"\b[sS](\d{1,2})\s*$")
 # Release-name junk: leading site/group prefixes
 SITE_PFX = re.compile(r"^(?:\[[^\]]*\]|www\.?\S+|[\w-]+\.(?:org|com|net|to|io|me|tv|bz|mx)(?:\s*[-–—]+\s*|\s{2,}))", re.I)
@@ -56,6 +60,34 @@ STRIP_CHARS = " -–—,;(["
 EXTRAS_PAT = re.compile(
     r"\b(trailer|teaser|featurette|behind|deleted|gag|interview|bts|making|"
     r"bonus|extras?|promo|shorts?|scenes?)\b", re.I)
+# Anime clean opening/ending songs: "NCOP1v2", "NCED2" (glued to digits, so
+# EXTRAS_PAT's trailing \b would never match)
+NC_TAG_PAT = re.compile(r"\bnc(?:op|ed)", re.I)
+# A clean_show() result that looks like an actual release ("Title (2021)"),
+# as opposed to a bonus clip or collection wrapper with no title of its own
+YEAR_PAREN_END = re.compile(r"\((?:19|20)\d{2}\)$")
+# Known duplicate-name variants for the same title, keyed by lowercased
+# variant name -> lowercased canonical name (release names disagree on
+# subtitle/spelling; not safe to derive this generically)
+ALIASES = {
+    "star wars andor": "andor",
+    "super natural": "supernatural",
+    "no hay otra opcion (no other choice)": "no other choice",
+}
+# One-off clean_show() misfires that aren't worth a general regex fix:
+# dot-decimal version numbers ("1.11") collapse into spaces, and one release
+# group mislabeled its year. Keyed by lowercased computed movie_dir.
+TITLE_OVERRIDES = {
+    "evangelion 1 11 - you are (not) alone":
+        "Evangelion 1.11 - You Are (Not) Alone (2007)",
+    "evangelion 2 22 - you can (not) advance":
+        "Evangelion 2.22 - You Can (Not) Advance (2009)",
+    "evangelion 3 0+1 11 - thrice upon a time (bd":
+        "Evangelion 3.0+1.0 - Thrice Upon a Time (2021)",
+    "neon genesis evangelion - the end of evangelion (1995)":
+        "Neon Genesis Evangelion - The End of Evangelion (1997)",
+    "gojira 1954 rm4k": "Godzilla (1954)",
+}
 
 
 def emby_friendly_name(filename):
@@ -105,6 +137,13 @@ def tv_target(item_name, fname):
     if season is None:
         m = ANIME_EP.match(fname)
         if m and not re.search(r"\b(vol|part|chapter)\.?$", m.group("show"), re.I):
+            episode = int(m.group("ep"))
+            prefix = m.group("show")
+            s = ANIME_SEASON.search(prefix)
+            season = int(s.group(1)) if s else 1
+    if season is None:
+        m = ANIME_EP_DOT.match(fname)
+        if m:
             episode = int(m.group("ep"))
             prefix = m.group("show")
             s = ANIME_SEASON.search(prefix)
@@ -182,8 +221,25 @@ def collect(kind, key):
                     or rel_parts[-1].lower().startswith("sample"):
                 continue
             vids.append((f, rel_parts))
-        for f, rel_parts in vids:
-            tgt = tv_target(item_name, rel_parts[-1])
+
+        # Classify every file up front so the movie branch can see the whole
+        # batch instead of deciding file-by-file: a season pack's leftover
+        # bonus clips need to know a real episode already claimed this item.
+        classified = [(f, rel_parts, tv_target(item_name, rel_parts[-1]))
+                      for f, rel_parts in vids]
+        any_tv = any(tgt or TV_PAT.search(f["name"]) for f, _, tgt in classified)
+
+        non_tv = [(f, rel_parts) for f, rel_parts, tgt in classified
+                  if not tgt and not TV_PAT.search(f["name"])]
+        main_titles = {}
+        for f, rel_parts in non_tv:
+            stem = os.path.splitext(rel_parts[-1])[0]
+            title = clean_show(stem)
+            if title and YEAR_PAREN_END.search(title):
+                main_titles.setdefault(title.lower(), title)
+        distinct_mains = list(main_titles.values())
+
+        for f, rel_parts, tgt in classified:
             if tgt:
                 parts = [sanitize(tgt[0]), tgt[1], tgt[2]]
                 is_tv = True
@@ -195,14 +251,35 @@ def collect(kind, key):
                     parts[-1] = emby_friendly_name(parts[-1])
                 else:
                     stem = os.path.splitext(rel_parts[-1])[0]
-                    if len(vids) > 1 and (len(rel_parts) > 1
-                                          or EXTRAS_PAT.search(stem)):
-                        # bonus material of a multi-file release: keep it with
-                        # the main movie instead of splitting it out
+                    stem_title = clean_show(stem)
+                    is_release = bool(stem_title and YEAR_PAREN_END.search(stem_title))
+                    if any_tv and not is_release:
+                        # TV bonus material (NCOP/NCED, "making of", featurette)
+                        # with no episode of its own and no home in movies/
+                        continue
+                    if len(distinct_mains) > 1:
+                        # a real multi-movie collection: each file is its own movie
+                        movie_dir = stem_title or clean_show(item_name) or item_name
+                    elif any_tv:
+                        # one real movie bundled inside a season+movie batch
+                        movie_dir = stem_title or clean_show(item_name) or item_name
+                    elif len(vids) > 1 and (len(rel_parts) > 1
+                                            or EXTRAS_PAT.search(stem)
+                                            or NC_TAG_PAT.search(stem)):
+                        # bonus material of a single movie: keep it with the
+                        # main movie instead of splitting it out
                         movie_dir = clean_show(item_name) or item_name
                     else:
-                        movie_dir = clean_show(stem) \
-                            or clean_show(item_name) or item_name
+                        movie_dir = stem_title or clean_show(item_name) or item_name
+                    if movie_dir and not YEAR_PAREN_END.search(movie_dir):
+                        # a bare release-group tag (e.g. a torrent whose only
+                        # video file is literally named "ETRG.mp4") shouldn't
+                        # beat a properly-descriptive torrent name
+                        alt = clean_show(item_name)
+                        if alt and YEAR_PAREN_END.search(alt):
+                            movie_dir = alt
+                    movie_dir = TITLE_OVERRIDES.get(
+                        (movie_dir or "").lower(), movie_dir)
                     parts = [sanitize(movie_dir), *rel_parts]
             parts[-1] += ".strm"
             yield (is_tv, parts, strm_url(kind, key, item["id"], f["id"]))
@@ -234,16 +311,30 @@ def main():
                 top = path.parts[tl]
                 counts[top] = counts.get(top, 0) + 1
         groups = {}
+        alias_bases = set()
         for top in counts:
-            base = re.sub(r"\s*\((?:19|20)\d{2}\)$", "", top).lower()
+            stripped = re.sub(r"\s*\((?:19|20)\d{2}(?:-(?:19|20)\d{2})?\)$",
+                              "", top).lower()
+            aliased = ALIASES.get(top.lower()) or ALIASES.get(stripped)
+            base = aliased or stripped
+            if aliased:
+                alias_bases.add(base)
             groups.setdefault(base, []).append(top)
         canonical = {}
-        for variants in groups.values():
+        for base, variants in groups.items():
             if len(variants) < 2:
                 continue
             yeared = [v for v in variants
-                      if re.search(r"\((?:19|20)\d{2}\)$", v)]
-            canon = yeared[0] if yeared else max(variants, key=counts.get)
+                      if re.search(r"\((?:19|20)\d{2}(?:-(?:19|20)\d{2})?\)$", v)]
+            if base in alias_bases:
+                # a known alias: prefer the variant matching the canonical
+                # spelling verbatim, and a non-shouty casing of it
+                exact = sorted((v for v in variants if v.lower() == base),
+                              key=lambda v: v.isupper())
+                canon = exact[0] if exact else \
+                    (yeared[0] if yeared else max(variants, key=counts.get))
+            else:
+                canon = yeared[0] if yeared else max(variants, key=counts.get)
             for v in variants:
                 if v != canon:
                     canonical[v] = canon
@@ -268,6 +359,8 @@ def main():
         f = fname.lower()
         if "remux" in f:  # disc bitrate 40-80+ Mbit: unstreamable over the cap
             return -1000
+        if re.search(r"\bai[\s._-]?upscale[dr]?\b", f):  # fake resolution
+            return -2000
         res = 0
         for w, v in (("2160p", 4), ("1080p", 3), ("720p", 2), ("480p", 1)):
             if w in f:
