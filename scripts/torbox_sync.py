@@ -81,6 +81,7 @@ ALIASES = {
     "super natural": "supernatural",
     "no hay otra opcion (no other choice)": "no other choice",
     "eojjeolsuga eobsda": "no other choice",
+    "darwin jihen": "the darwin incident",
 }
 # One-off clean_show() misfires that aren't worth a general regex fix:
 # dot-decimal version numbers ("1.11") collapse into spaces, and one release

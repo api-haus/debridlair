@@ -15,9 +15,9 @@ native Skip Intro (intro/credits detection) working over STRM.
 
 ## Libraries
 
-- **TV Shows** → `./library/tv` — generated `.strm` from all Torbox torrents/usenet/web downloads
+- **TV Shows** → `./library/tv` — generated `.strm` from all Torbox torrents/usenet/web downloads,
+  anime included (no separate library — one show, one place)
 - **Movies** → `./library/movies` — same
-- **Anime** → `/mnt/archive4/strm-extra/anime` (pre-existing STRM collection)
 - **Torbox (raw)** → the WebDAV mount itself (browse everything as files)
 
 `.strm` layout is **normalized**, not torrent-shaped: the sync parses
@@ -120,9 +120,7 @@ drop the `devices:` entry from `emby`); the parent of this directory must be a
    enforced at acquisition time by `torbox_find.py`, but playback defaults are
    a UI setting.
 3. **Host-specific compose values.** `GIDLIST` is this box's render/video group
-   IDs (`getent group render video`); the `/mnt/archive4/strm-extra/anime` bind
-   and its matching Anime library in `emby_setup.py:236` are local to this
-   machine — drop both if that path doesn't exist.
+   IDs (`getent group render video`).
 
 ## Notes / gotchas encountered
 

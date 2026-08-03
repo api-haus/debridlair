@@ -4,7 +4,7 @@
 - completes the startup wizard
 - creates the admin user
 - registers the Premiere key
-- creates libraries (TV / Movies / Anime / Torbox raw)
+- creates libraries (TV / Movies / Torbox raw)
 - enables intro marker detection (Detect Episode Intros) on TV libraries
 - kicks off a library scan
 
@@ -233,7 +233,6 @@ def main():
 
     add_library(token, "TV Shows", "tvshows", ["/media/library/tv"])
     add_library(token, "Movies", "movies", ["/media/library/movies"])
-    add_library(token, "Anime", "tvshows", ["/media/anime"])
     add_library(token, "Torbox (raw)", "mixed", ["/media/torbox"])
 
     enable_intro_detection(token)

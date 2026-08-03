@@ -120,7 +120,6 @@ services:
     volumes:
       - ./emby:/config
       - ./library:/media/library
-      - /mnt/archive4/strm-extra/anime:/media/anime:ro
       - type: bind
         source: ./rclone/mnt
         target: /media/torbox
