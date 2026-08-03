@@ -19,6 +19,11 @@ API = "https://api.torbox.app/v1/api"
 
 VIDEO_EXT = {".mkv", ".mp4", ".avi", ".m4v", ".ts", ".mov", ".wmv",
              ".flv", ".webm", ".mpg", ".mpeg", ".m2ts", ".vob", ".ogm"}
+# Below this a "video" file is a broken/placeholder upload, not real content
+MIN_VIDEO_SIZE = 3 * 1024 * 1024
+# A batch's biggest non-TV file only counts as "the real movie" (as opposed
+# to an unusually long bonus clip) above this size
+MAIN_FILE_MIN_SIZE = 700 * 1024 * 1024
 TV_PAT = re.compile(r"(?:[sS]\d{1,2}[eE]\d{1,3}|\b\d{1,2}x\d{1,3}\b|"
                     r"[eE][pP]?\d{1,3}\b|[sS]eason\s*\d+)", re.I)
 BAD_CHARS = re.compile(r'[<>:"|?*\x00-\x1f]')
@@ -75,6 +80,7 @@ ALIASES = {
     "star wars andor": "andor",
     "super natural": "supernatural",
     "no hay otra opcion (no other choice)": "no other choice",
+    "eojjeolsuga eobsda": "no other choice",
 }
 # One-off clean_show() misfires that aren't worth a general regex fix:
 # dot-decimal version numbers ("1.11") collapse into spaces, and one release
@@ -90,6 +96,13 @@ TITLE_OVERRIDES = {
         "Neon Genesis Evangelion - The End of Evangelion (1997)",
     "gojira 1954 rm4k": "Godzilla (1954)",
 }
+# Kodi/Emby special-features folder names: content nested under one of these
+# is attached to the parent movie instead of showing as its own movie card
+EXTRAS_DIR_NAMES = {"featurettes", "extras", "extra", "behind the scenes",
+                    "deleted scenes", "interviews", "scenes", "shorts",
+                    "trailers", "other", "specials"}
+# A short preview clip bundled alongside the real file, not the movie itself
+SAMPLE_PAT = re.compile(r"\bsample\b", re.I)
 
 
 def emby_friendly_name(filename):
@@ -220,7 +233,11 @@ def collect(kind, key):
                 continue
             if any(p.lower() in ("sample", "samples", "proof")
                    for p in rel_parts) \
-                    or rel_parts[-1].lower().startswith("sample"):
+                    or SAMPLE_PAT.search(os.path.splitext(rel_parts[-1])[0]):
+                continue
+            if (f.get("size") or 0) < MIN_VIDEO_SIZE:
+                # too small to be real content (a broken/placeholder upload,
+                # not even a legitimate short bonus clip)
                 continue
             vids.append((f, rel_parts))
 
@@ -233,12 +250,22 @@ def collect(kind, key):
 
         non_tv = [(f, rel_parts) for f, rel_parts, tgt in classified
                   if not tgt and not TV_PAT.search(f["name"])]
+        # A bonus clip can legitimately run to a few hundred MB (a lossless
+        # anime clean-ED, a making-of documentary), but nothing observed in
+        # this library's actual bonus content comes close to a feature's
+        # size — so "by far the largest file in the batch" is a much more
+        # reliable "this is the real movie" signal than the file's own name.
+        max_non_tv_size = max((f.get("size") or 0 for f, _ in non_tv), default=0)
+        release_ids = set()
         main_titles = {}
         for f, rel_parts in non_tv:
             stem = os.path.splitext(rel_parts[-1])[0]
             title = clean_show(stem)
-            if title and YEAR_PAREN_END.search(title):
-                main_titles.setdefault(title.lower(), title)
+            is_biggest = (f.get("size") or 0) == max_non_tv_size \
+                and max_non_tv_size >= MAIN_FILE_MIN_SIZE
+            if is_biggest or (title and YEAR_PAREN_END.search(title)):
+                release_ids.add(id(f))
+                main_titles.setdefault((title or stem).lower(), title or stem)
         distinct_mains = list(main_titles.values())
 
         for f, rel_parts, tgt in classified:
@@ -254,7 +281,7 @@ def collect(kind, key):
                 else:
                     stem = os.path.splitext(rel_parts[-1])[0]
                     stem_title = clean_show(stem)
-                    is_release = bool(stem_title and YEAR_PAREN_END.search(stem_title))
+                    is_release = id(f) in release_ids
                     if any_tv and not is_release:
                         # TV bonus material (NCOP/NCED, "making of", featurette)
                         # with no episode of its own and no home in movies/
@@ -282,6 +309,21 @@ def collect(kind, key):
                             movie_dir = alt
                     movie_dir = TITLE_OVERRIDES.get(
                         (movie_dir or "").lower(), movie_dir)
+                    if len(distinct_mains) > 1:
+                        # every split-out movie shared the exact same wrapper
+                        # subfolder name (the collection's own name); Emby
+                        # picks that up as the title instead of movie_dir and
+                        # groups every movie in the pack under it
+                        rel_parts = [rel_parts[-1]]
+                    if not is_release and not any(
+                            p.lower() in EXTRAS_DIR_NAMES
+                            for p in rel_parts[:-1]):
+                        # Emby only attaches a bonus clip to the movie (instead
+                        # of showing it as its own movie card) if it's nested
+                        # under a recognized extras folder name — as a sibling
+                        # of wherever the main release itself ends up, same as
+                        # the releases where this already works correctly
+                        rel_parts = [*rel_parts[:-1], "Featurettes", rel_parts[-1]]
                     parts = [sanitize(movie_dir), *rel_parts]
             parts[-1] += ".strm"
             yield (is_tv, parts, strm_url(kind, key, item["id"], f["id"]))
@@ -385,6 +427,26 @@ def main():
         key = (path.parts[tl].lower(), int(sm.group(1)), int(m.group(2)))
         groups.setdefault(key, []).append(path)
     deduped = 0
+    for entries in groups.values():
+        if len(entries) < 2:
+            continue
+        entries.sort(key=lambda p: qscore(p.name), reverse=True)
+        for loser in entries[1:]:
+            del wanted[loser]
+            deduped += 1
+
+    # Same idea for movies: multiple cached releases of the same title show
+    # up as separate movie cards in Emby unless only the best one survives.
+    # Bonus clips (already routed under a Featurettes/ dir) are left alone.
+    tl = len(LIB_MOVIES.parts)
+    groups = {}
+    for path in wanted:
+        if path.parts[:tl] != LIB_MOVIES.parts or len(path.parts) <= tl + 1:
+            continue
+        rel = path.parts[tl + 1:]
+        if any(p.lower() in EXTRAS_DIR_NAMES for p in rel[:-1]):
+            continue
+        groups.setdefault(path.parts[tl], []).append(path)
     for entries in groups.values():
         if len(entries) < 2:
             continue
