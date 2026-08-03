@@ -309,21 +309,14 @@ def collect(kind, key):
                             movie_dir = alt
                     movie_dir = TITLE_OVERRIDES.get(
                         (movie_dir or "").lower(), movie_dir)
-                    if len(distinct_mains) > 1:
-                        # every split-out movie shared the exact same wrapper
-                        # subfolder name (the collection's own name); Emby
-                        # picks that up as the title instead of movie_dir and
-                        # groups every movie in the pack under it
-                        rel_parts = [rel_parts[-1]]
-                    if not is_release and not any(
-                            p.lower() in EXTRAS_DIR_NAMES
-                            for p in rel_parts[:-1]):
-                        # Emby only attaches a bonus clip to the movie (instead
-                        # of showing it as its own movie card) if it's nested
-                        # under a recognized extras folder name — as a sibling
-                        # of wherever the main release itself ends up, same as
-                        # the releases where this already works correctly
-                        rel_parts = [*rel_parts[:-1], "Featurettes", rel_parts[-1]]
+                    # Always flatten to movie_dir/file or movie_dir/Featurettes/
+                    # file: any preserved release-subfolder name (a site
+                    # prefix, a shared collection wrapper, an uploader tag)
+                    # risks Emby reading it as the title instead of movie_dir,
+                    # and it leaves bonus clips orphaned with no sibling movie
+                    # file whenever a *different* release wins the dedup below.
+                    rel_parts = [rel_parts[-1]] if is_release \
+                        else ["Featurettes", rel_parts[-1]]
                     parts = [sanitize(movie_dir), *rel_parts]
             parts[-1] += ".strm"
             yield (is_tv, parts, strm_url(kind, key, item["id"], f["id"]))
