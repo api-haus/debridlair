@@ -4,6 +4,19 @@ Emby + Torbox debrid streaming stack. Emby 4.8.11 on `:8096` (admin: see
 `.env`), Prowlarr on `:9696`, all state in this directory. Full details in
 `README.md`; secrets in `.env` (chmod 600, never commit, never print).
 
+## Default to fetching — don't ask first
+
+Acquiring content is the whole point of this stack. When a specific movie or
+show title is on the table — the user names it, asks for it, or is reacting
+to a recommendation (yours or theirs) in a way that signals they want it —
+just run `torbox_find.py` and queue it. **Don't ask "want me to fetch this?"
+first; that's the default action, not a question.** Only hold off when the
+user is clearly just chatting or researching with no acquisition intent, or
+has explicitly said to wait. Fetching is cheap and reversible (see Torbox
+deletes below), so bias toward doing it over asking permission — this
+applies just as much to titles you yourself suggested a moment ago as to
+ones the user named.
+
 ## Add a movie or series by name (the common request)
 
 ```bash
