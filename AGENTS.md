@@ -68,7 +68,14 @@ UI use Identify. Item GET by id is `/emby/Users/{uid}/Items/{id}`, not
   searches, unless the user explicitly asks for only one season.
 - Language policy: original audio only, never dub-only releases (LAT/CAST/
   MVO/DVO/dubbed without an original/eng track). `torbox_find.py` refuses
-  these; respect it. English subtitles are the user's default.
+  these; respect it. English subtitles are the user's default. This is a
+  standing policy, not a per-title judgment call — **do not ask the user to
+  choose between subtitle-language variants.** `torbox_find.py`'s auto-pick
+  ranks by resolution/remux/HDR/seeders only and does **not** check subtitle
+  language, so a release with non-English (or missing) subs can win the
+  auto-pick. When that happens, just requeue the best release that actually
+  has English subs yourself and drop the non-compliant one — same as any
+  other policy `torbox_find.py` doesn't enforce for you.
 - Torbox deletes: `POST /v1/api/torrents/controltorrent`
   `{"torrent_id": N, "operation": "delete"}` — irreversible, confirm with the
   user first unless they pre-approved the specific items.
