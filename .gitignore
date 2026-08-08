@@ -1,6 +1,11 @@
 # Secrets
 .env
-sync-state/
+# Contents are secret (emby_api_key), but the watchlist is configuration and
+# would otherwise be lost on a fresh clone. Needs the glob rather than a bare
+# "sync-state/": git will not descend into an excluded directory to un-exclude
+# a file inside it.
+sync-state/*
+!sync-state/watchlist.txt
 
 # Runtime state / generated
 emby/

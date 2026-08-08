@@ -15,6 +15,7 @@ After queuing, the torbox-sync loop (15 min) writes the .strm files and Emby
 picks the title up automatically.
 """
 import json
+import os
 import re
 import subprocess
 import sys
@@ -27,7 +28,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from torbox_sync import load_env  # noqa: E402
 
-PROWLARR = "http://localhost:9696"
+# Overridable because callers inside the compose network reach Prowlarr by
+# service name, not on the host's published port.
+PROWLARR = os.environ.get("PROWLARR_URL", "http://localhost:9696")
 TV_CATS = "5000,5010,5020,5030,5040,5045,5050"      # TV + HD/SD/UHD
 MOVIE_CATS = "2000,2010,2020,2030,2040,2045,2050,2060"  # Movies
 
@@ -123,6 +126,39 @@ def score(r):
     return s
 
 
+def prowlarr_key():
+    key = load_env().get("PROWLARR_API_KEY")
+    if not key:
+        cfg = Path(__file__).resolve().parent.parent / "prowlarr" / "config.xml"
+        key = re.search(r"<ApiKey>([^<]+)", cfg.read_text()).group(1)
+    return key
+
+
+def search(query, tv=True, allow_fat=False, key=None):
+    """Return (acceptable releases best-first, releases refused as over-cap)."""
+    cats = TV_CATS if tv else MOVIE_CATS
+    q = urllib.parse.urlencode(
+        [("query", query), ("limit", 100)]
+        + [("categories", c) for c in cats.split(",")])
+    results = [r for r in prowlarr(f"/search?{q}", key or prowlarr_key())
+               if r.get("magnetUrl") or r.get("downloadUrl")]
+    fat = []
+    if not allow_fat:
+        fat = [r for r in results if over_limit(r)]
+        results = [r for r in results if not over_limit(r)]
+    results.sort(key=score, reverse=True)
+    return results, fat
+
+
+def queue(r):
+    """Send one release to Torbox."""
+    grab = resolve_grab(r.get("magnetUrl") or r.get("downloadUrl"))
+    print(f"queuing: {r.get('title')} "
+          f"({(r.get('size') or 0)/1e9:.1f} GB, {r.get('seeders')} seeds)")
+    add = Path(__file__).with_name("torbox_add.py")
+    subprocess.run([sys.executable, str(add), grab], check=True)
+
+
 def main():
     args = [a for a in sys.argv[1:] if not a.startswith("-")]
     flags = {a for a in sys.argv[1:] if a.startswith("-")}
@@ -132,20 +168,9 @@ def main():
     pick = None
     if "-n" in flags:
         pick = int(args[1]) if len(args) > 1 else None
-    key = load_env().get("PROWLARR_API_KEY")
-    if not key:
-        cfg = Path(__file__).resolve().parent.parent / "prowlarr" / "config.xml"
-        key = re.search(r"<ApiKey>([^<]+)", cfg.read_text()).group(1)
-    cats = TV_CATS if "--tv" in flags else MOVIE_CATS
-    q = urllib.parse.urlencode(
-        [("query", query), ("limit", 100)]
-        + [("categories", c) for c in cats.split(",")])
-    results = prowlarr(f"/search?{q}", key)
-    results = [r for r in results
-               if r.get("magnetUrl") or r.get("downloadUrl")]
+    results, fat = search(query, tv="--tv" in flags,
+                          allow_fat="--allow-fat" in flags)
     if "--allow-fat" not in flags:
-        fat = [r for r in results if over_limit(r)]
-        results = [r for r in results if not over_limit(r)]
         if fat:
             print(f"skipped {len(fat)} over-limit releases "
                   f"(remux / >{int(EP_MAX//1e9)} GB ep / >{int(MOVIE_MAX//1e9)} GB movie / "
@@ -153,7 +178,6 @@ def main():
         if not results:
             sys.exit(f"nothing streamable within the 40 Mbit cap for {query!r}; "
                      f"re-run with --allow-fat to see everything")
-    results.sort(key=score, reverse=True)
     if not results:
         sys.exit(f"no results with magnets for {query!r}")
     if "--list" in flags or pick is None and "-n" in flags:
@@ -170,11 +194,7 @@ def main():
     if over_limit(r):
         sys.exit(f"refusing: {r.get('title')} exceeds the 40 Mbit streamability "
                  f"cap ({over_limit(r)}); pick another or use --allow-fat")
-    grab = resolve_grab(r.get("magnetUrl") or r.get("downloadUrl"))
-    print(f"queuing: {r.get('title')} "
-          f"({(r.get('size') or 0)/1e9:.1f} GB, {r.get('seeders')} seeds)")
-    add = Path(__file__).with_name("torbox_add.py")
-    subprocess.run([sys.executable, str(add), grab], check=True)
+    queue(r)
 
 
 if __name__ == "__main__":

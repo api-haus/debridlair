@@ -51,12 +51,18 @@ services:
     container_name: torbox-sync
     restart: unless-stopped
     user: "1000:1000"
+    environment:
+      # torbox_watch reaches Prowlarr by service name; the published port on
+      # the host is not localhost from in here.
+      PROWLARR_URL: http://prowlarr:9696
     command: >
-      sh -c "while true; do
+      sh -c "i=0; while true; do
         python3 /scripts/torbox_sync.py;
         curl -sf -X POST 'http://emby:8096/emby/Library/Refresh?api_key='$$(cat /sync-state/emby_api_key 2>/dev/null) >/dev/null 2>&1 || true;
         sleep 120;
         python3 /scripts/emby_probe.py --limit 150 || true;
+        i=$$((i+1));
+        [ $$((i % 4)) -ne 0 ] || python3 /scripts/torbox_watch.py || true;
         sleep 780;
       done"
     volumes:
@@ -64,8 +70,11 @@ services:
       - ./library:/library
       - ./.env:/.env:ro
       - ./sync-state:/sync-state:ro
+      # read-only: only for the <ApiKey> in config.xml
+      - ./prowlarr:/prowlarr:ro
     depends_on:
       - emby
+      - prowlarr
 
   prowlarr:
     image: linuxserver/prowlarr:latest
@@ -139,3 +148,14 @@ networks:
     driver: bridge
     driver_opts:
       com.docker.network.bridge.name: br-debrid
+      # Insurance against a VPN with a smaller MTU than the bridge. When the
+      # host routed egress over surfshark_wg (MTU 1280) while containers ran
+      # at the 1500 default, they emitted packets the tunnel couldn't carry,
+      # and the ICMP "fragmentation needed" that would fix it never made it
+      # back through NAT — so anything with a large TLS handshake (TMDb, TVDB,
+      # api.torbox.app) hung until timeout while small requests looked fine.
+      # That stalled Emby's metadata scan and failed torbox_sync's listing,
+      # which then pruned the library. The VPN is off as of 2026-08-08, so
+      # this is belt-and-braces; keep it unless you need the ~1.5% of header
+      # overhead back, and lower it if a future tunnel goes below 1280.
+      com.docker.network.driver.mtu: "1280"

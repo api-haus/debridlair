@@ -1,0 +1,17 @@
+# Shows to keep topped up as new episodes air.
+#
+#   <library/tv folder> | <query template>
+#
+# The template gets the next episode number as {ep} ({ep:02d} to zero-pad) and
+# the season as {season}. torbox_watch.py counts from the highest episode
+# already in the folder's newest season, so nothing is re-queued.
+#
+# Use {season:02d} rather than hard-coding the season number: that is what
+# lets the watcher also notice a *new* season premiering, not just the next
+# episode of the current one.
+#
+# Drop a line when a show ends for good; each entry costs two indexer
+# searches per run once its season has finished airing.
+
+Chainsmoker Cat | Chainsmoker Cat S{season:02d}E{ep:02d}
+Jujutsu Kaisen (2020) | Jujutsu Kaisen S{season}E{ep:02d}
