@@ -8,6 +8,7 @@ import json
 import os
 import re
 import sys
+import time
 import urllib.request
 import urllib.parse
 from pathlib import Path
@@ -16,6 +17,10 @@ BASE = Path(__file__).resolve().parent.parent
 LIB_TV = BASE / "library" / "tv"
 LIB_MOVIES = BASE / "library" / "movies"
 API = "https://api.torbox.app/v1/api"
+# Guards against a partial API result being mistaken for a mass delete: refuse
+# to prune more than this share of an already-populated library unprompted.
+MAX_PRUNE_FRACTION = 0.25
+MASS_PRUNE_FLOOR = 20
 
 VIDEO_EXT = {".mkv", ".mp4", ".avi", ".m4v", ".ts", ".mov", ".wmv",
              ".flv", ".webm", ".mpg", ".mpeg", ".m2ts", ".vob", ".ogm"}
@@ -185,16 +190,28 @@ def load_env():
     return env
 
 
-def api_get(path, key):
+def api_get(path, key, attempts=4):
+    # Torbox's edge routinely drops a TLS handshake or answers 403/520 under
+    # load. Retry before giving up: a bare failure here used to propagate as
+    # "this source owns nothing", which the prune below reads as a mandate to
+    # delete every .strm it backs.
     req = urllib.request.Request(
         API + path,
         headers={"Authorization": f"Bearer {key}",
                  "User-Agent": "debrid-emby-stack/1.0"})
-    with urllib.request.urlopen(req, timeout=60) as r:
-        payload = json.load(r)
-    if not payload.get("success"):
-        raise RuntimeError(f"Torbox API error on {path}: {payload.get('error')}")
-    return payload.get("data") or []
+    for attempt in range(attempts):
+        try:
+            with urllib.request.urlopen(req, timeout=60) as r:
+                payload = json.load(r)
+            if not payload.get("success"):
+                raise RuntimeError(
+                    f"Torbox API error on {path}: {payload.get('error')}")
+            return payload.get("data") or []
+        except Exception as e:
+            if attempt == attempts - 1:
+                raise
+            print(f"[retry] {path}: {e}", file=sys.stderr)
+            time.sleep(2 ** attempt * 5)
 
 
 def sanitize(part):
@@ -327,6 +344,7 @@ def main():
     key = load_env()["TORBOX_API_KEY"]
     wanted = {}  # Path -> url
     skipped = 0
+    failed = []
     for kind in ("torrents", "usenet", "webdl"):
         try:
             for is_tv, parts, url in collect(kind, key):
@@ -338,6 +356,7 @@ def main():
                 wanted[path] = url
         except Exception as e:
             print(f"[warn] {kind}: {e}", file=sys.stderr)
+            failed.append(kind)
 
     # Merge top-level dirs that differ only by case or a "(year)" suffix
     # ("rick and morty" / "Rick and Morty", "Fallout" / "Fallout (2024)").
@@ -459,19 +478,41 @@ def main():
             updated += 1
             path.write_text(url)
 
+    # Pruning is only safe when `wanted` is a complete picture of the account.
+    # A source that errored contributes nothing, so every .strm it backs would
+    # look stale — one dropped TLS handshake once deleted 1137 files this way.
+    stale = [p for root in (LIB_TV, LIB_MOVIES)
+             for p in sorted(root.rglob("*.strm"), reverse=True)
+             if p not in wanted]
+    existing = sum(1 for root in (LIB_TV, LIB_MOVIES)
+                   for _ in root.rglob("*.strm"))
+    if failed:
+        prune_block = f"{','.join(failed)} failed to list"
+    elif (len(stale) > existing * MAX_PRUNE_FRACTION
+            and existing >= MASS_PRUNE_FLOOR
+            and "--allow-mass-prune" not in sys.argv):
+        # Nothing raised, but a truncated 200 looks identical to a real mass
+        # delete. Make the caller confirm rather than guessing which it was.
+        prune_block = (f"would delete {len(stale)}/{existing} files; "
+                       f"re-run with --allow-mass-prune if intended")
+    else:
+        prune_block = None
+
     removed = 0
-    for root in (LIB_TV, LIB_MOVIES):
-        for p in sorted(root.rglob("*.strm"), reverse=True):
-            if p not in wanted:
-                p.unlink()
-                removed += 1
+    if prune_block:
+        print(f"[skip-prune] {prune_block}", file=sys.stderr)
+    else:
+        for p in stale:
+            p.unlink()
+            removed += 1
         # prune empty dirs bottom-up
-        for d in sorted((d for d in root.rglob("*") if d.is_dir()),
-                        key=lambda d: len(d.parts), reverse=True):
-            try:
-                d.rmdir()
-            except OSError:
-                pass
+        for root in (LIB_TV, LIB_MOVIES):
+            for d in sorted((d for d in root.rglob("*") if d.is_dir()),
+                            key=lambda d: len(d.parts), reverse=True):
+                try:
+                    d.rmdir()
+                except OSError:
+                    pass
 
     print(f"strm sync: {len(wanted)} wanted, {created} created, "
           f"{updated} updated, {removed} removed, {skipped} dup-skipped, "

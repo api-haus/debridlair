@@ -95,6 +95,14 @@ UI use Identify. Item GET by id is `/emby/Users/{uid}/Items/{id}`, not
 - `.strm` layout is normalized by the sync script (show/season parsing,
   quality dedupe for TV). If Emby shows strays or duplicate episodes, the fix
   belongs in `torbox_sync.py`, not in Emby or on disk.
+- **The sync only prunes when it got a complete account listing.** Torbox's
+  API drops handshakes and serves sporadic 403/520s; a source that fails to
+  list makes every `.strm` it backs look stale. `torbox_sync.py` retries, then
+  skips the prune entirely if any source errored, and refuses to delete >25%
+  of a populated library without `--allow-mass-prune`. Don't "simplify" these
+  guards away — without them one timed-out request wipes the library (it
+  deleted 1137 files on 2026-08-08). A `[skip-prune]` line on stderr is the
+  guard working; re-run once the API is healthy.
 
 ## Stack layout
 
