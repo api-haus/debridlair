@@ -41,8 +41,11 @@ EP_TOKEN = re.compile(r"[sS](\d{1,4})[eE][pP]?(\d{1,4})")
 X_TOKEN = re.compile(r"\b(\d{1,2})x(\d{1,3})\b")
 # Anime-style absolute numbering: "[Group] Show Name - 03 [1080p...]" or
 # "Show Name - E03 v2 [1080p...]" (literal E prefix, optional version tag)
+# A bare number needs two digits to be an episode rather than part of the
+# title, but an explicit "E" prefix is unambiguous, so "- E1 v2" counts too.
 ANIME_EP = re.compile(r"^(?:\[[^\]]*\]\s*)*(?P<show>.+?)\s*-\s*"
-                      r"[eE]?(?P<ep>\d{2,3})(?:\s*-\s*\d{2,3})?"
+                      r"(?:[eE](?P<ep_pfx>\d{1,3})|(?P<ep>\d{2,3}))"
+                      r"(?:\s*-\s*\d{2,3})?"
                       r"(?:\s*v\d+)?\s*(?:[\[\(]|$)")
 # Dot-separated absolute numbering with no dash: "Show.Name.53.v2.1080p..."
 ANIME_EP_DOT = re.compile(
@@ -67,6 +70,9 @@ SHOW_TOKEN_CUT = re.compile(
     r"\b(?:s\d{1,2}(?:e\d{1,3})?(?:\s*-\s*s?\d{1,2}(?:e\d{1,3})?)?|"
     r"season\s*\d+(?:\s*(?:and|&)\s*\d+)*)\b", re.I)
 YEAR_END = re.compile(r"\b((?:19|20)\d{2})\s*$")
+# A run's span ("Jujutsu Kaisen (2020-2023)") is not a year Emby can parse: it
+# reads the folder as the title "Jujutsu Kaisen (2020". Keep the first year.
+YEAR_RANGE_END = re.compile(r"\(((?:19|20)\d{2})\s*[-–—]\s*(?:19|20)?\d{2,4}\)\s*$")
 STRIP_CHARS = " -–—,;(["
 # Bonus material that should stay inside the parent movie's folder
 EXTRAS_PAT = re.compile(
@@ -102,6 +108,17 @@ TITLE_OVERRIDES = {
         "Neon Genesis Evangelion - The End of Evangelion (1997)",
     "gojira 1954 rm4k": "Godzilla (1954)",
 }
+# Series whose releases circulate under more than one title (romaji vs the
+# English broadcast name). Without this the same show lands in two folders and
+# the per-episode quality dedupe never sees the duplicates as duplicates.
+SHOW_ALIASES = {
+    "yani neko": "Chainsmoker Cat",
+}
+# "<Show> OVA" / "<Show> Specials" is not a series of its own — Emby's
+# convention is season 0 of the parent show, which is also the only way the
+# bonus episodes inherit the parent's artwork and metadata instead of showing
+# up as an unidentifiable extra entry beside it.
+SPECIALS_SUFFIX = re.compile(r"\s*[-–:]?\s*\b(?:ovas?|specials?)\b\s*$", re.I)
 # Kodi/Emby special-features folder names: content nested under one of these
 # is attached to the parent movie instead of showing as its own movie card
 EXTRAS_DIR_NAMES = {"featurettes", "extras", "extra", "behind the scenes",
@@ -137,33 +154,40 @@ def clean_show(name):
         name = name[:m.start()]
     name = re.sub(r"[._]+", " ", name).strip(STRIP_CHARS)
     name = YEAR_END.sub(r"(\1)", name)
+    name = YEAR_RANGE_END.sub(r"(\1)", name)
     return name or None
 
 
 def tv_target(item_name, fname):
     """Return (series_dir, season_dir, filename) for an episode file, or None
     if it is not recognizably a TV episode."""
+    # Some groups separate every token with underscores rather than spaces or
+    # dots ("[Cleo]Shinsekai_yori_-_01_(...)"). Underscore is a word char, so
+    # the \s and \b anchors below never fire on those names and the whole
+    # series is misread as a pile of movies. Substituting 1:1 keeps the string
+    # length identical, so every match offset stays valid against `fname`.
+    probe = fname.replace("_", " ")
     season = episode = None
     prefix = ""
     for pat in (EP_TOKEN, X_TOKEN):
-        m = pat.search(fname)
+        m = pat.search(probe)
         if m:
             season, episode = int(m.group(1)), int(m.group(2))
-            prefix = fname[:m.start()]
+            prefix = probe[:m.start()]
             break
     if season is None:
-        m = DOT_EP_PAT.match(fname)
+        m = DOT_EP_PAT.match(probe)
         if m:
             season, episode = int(m.group(1)), int(m.group(2))
     if season is None:
-        m = ANIME_EP.match(fname)
+        m = ANIME_EP.match(probe)
         if m and not re.search(r"\b(vol|part|chapter)\.?$", m.group("show"), re.I):
-            episode = int(m.group("ep"))
+            episode = int(m.group("ep_pfx") or m.group("ep"))
             prefix = m.group("show")
             s = ANIME_SEASON.search(prefix)
             season = int(s.group(1)) if s else 1
     if season is None:
-        m = ANIME_EP_DOT.match(fname)
+        m = ANIME_EP_DOT.match(probe)
         if m:
             episode = int(m.group("ep"))
             prefix = m.group("show")
@@ -174,7 +198,12 @@ def tv_target(item_name, fname):
     show = clean_show(prefix) or clean_show(item_name)
     if not show:
         return None
-    if not EP_TOKEN.search(fname):
+    m = SPECIALS_SUFFIX.search(show)
+    if m and show[:m.start()].strip(STRIP_CHARS):
+        show = show[:m.start()].strip(STRIP_CHARS)
+        season = 0
+    show = SHOW_ALIASES.get(show.lower(), show)
+    if not EP_TOKEN.search(probe):
         stem, ext = os.path.splitext(fname)
         fname = f"S{season:02d}E{episode:02d} - {emby_friendly_name(stem)}{ext}"
     return show, f"Season {season:02d}", fname
