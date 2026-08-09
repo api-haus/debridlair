@@ -113,6 +113,8 @@ TITLE_OVERRIDES = {
 # the per-episode quality dedupe never sees the duplicates as duplicates.
 SHOW_ALIASES = {
     "yani neko": "Chainsmoker Cat",
+    "dcs legends of tomorrow": "DC's Legends of Tomorrow",
+    "legends of tomorrow": "DC's Legends of Tomorrow",
 }
 # "<Show> OVA" / "<Show> Specials" is not a series of its own — Emby's
 # convention is season 0 of the parent show, which is also the only way the
