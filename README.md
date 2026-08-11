@@ -90,20 +90,24 @@ season premiering instead of waiting for one you named.
 You need Docker with `/dev/fuse`, a [Torbox](https://torbox.app) account, and
 an Emby Premiere key if you want Skip Intro and hardware transcoding.
 
-```bash
-cp .env.example .env          # Torbox + Emby credentials
-cp PREFS.example.md PREFS.md  # your preferences; gitignored, edit freely
-docker compose up -d
-python3 scripts/torbox_sync.py
-python3 scripts/emby_setup.py # wizard, admin user, libraries, plugins — re-runnable
-docker compose restart emby
-```
+Then clone this, open your favourite LLM client in the directory, and say:
 
-Emby is on `:8096`, Prowlarr on `:9696`. Add a few indexers in Prowlarr — the
-search side is empty without them — and you are done.
+> set this up
 
-Then open your agent in this directory and ask it for a movie. It reads
-`AGENTS.md` on its own.
+That is the install. It reads `AGENTS.md`, asks you for the credentials it
+cannot know, brings the containers up, bootstraps Emby, and walks you through
+the one part nobody can script — adding a few indexers to Prowlarr on `:9696`.
+
+Then it runs `/hello-debrid`, which is a short conversation about how you want
+the library to behave: dubs or subtitles, how fat a file your connection can
+stand, whether it should confirm before fetching anything. Your answers become
+`PREFS.md`, which is yours and stays out of git.
+
+After that, ask it for a film.
+
+If you would rather drive, every step is written out in
+[AGENTS.md](AGENTS.md) — the agent is following that file, not doing anything
+you cannot do yourself.
 
 ## Under the hood
 

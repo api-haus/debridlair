@@ -18,6 +18,51 @@ settings. If `PREFS.md` is missing, copy `PREFS.example.md` to it first.
 Write to `PREFS.md` only on an explicit instruction. It is not a place to
 record what the user watches or to log inferences about their taste.
 
+If there is no `PREFS.md`, mention `/hello-debrid` once — lightly, at a natural
+pause, never as a gate on the thing they asked for. *"You have no PREFS.md yet;
+`/hello-debrid` sets your language, size and autonomy preferences in about a
+minute."* If they opened the session asking for a film, fetch the film first and
+mention it after. Do not ask the preference questions inline instead: that is
+what the skill is for, and asked ad hoc they end up answered but unrecorded.
+
+## First run — setting the stack up
+
+Someone opening a session here with nothing running yet is a normal request, not
+a special occasion. `docker compose ps` tells you where you are. Work through
+this and ask only for what you cannot know.
+
+1. **Credentials.** Copy `.env.example` to `.env`, `chmod 600` it, and ask the
+   user for the Torbox API key, their Torbox account email and password, an Emby
+   admin user and password, and an Emby Premiere key if they have one (without
+   it there is no Skip Intro and no hardware transcoding, but the stack runs).
+   The rclone password is the account password put through
+   `rclone obscure "$TORBOX_PASSWORD"` — the WebDAV mount authenticates with the
+   account email and password, *not* the API key.
+2. **Host prerequisites.** Docker with `/dev/fuse`; `GIDLIST` in
+   `docker-compose.yml` is this box's render and video group ids
+   (`getent group render video`); the parent of this directory must be a shared
+   mount (`findmnt -no PROPAGATION .`) or Emby's `rshared` bind fails; drop the
+   `devices:` entry from the `emby` service if there is no VAAPI `/dev/dri`.
+3. `docker compose up -d`
+4. `python3 scripts/torbox_sync.py` — first library build from whatever the
+   account already holds.
+5. `python3 scripts/emby_setup.py` — startup wizard, admin user, Premiere key,
+   API key into `sync-state/emby_api_key`, libraries, intro detection,
+   StrmAssistant. Safe to re-run.
+6. `docker compose restart emby` — loads StrmAssistant.
+7. **Prowlarr indexers.** Not scriptable: the indexer list lives in
+   `prowlarr/prowlarr.db`, which is not committed. Walk the user through adding
+   Knaben, The Pirate Bay, LimeTorrents and Nyaa.si at `:9696`, or
+   `torbox_find.py` returns nothing. (1337x and EZTV are Cloudflare-walled and
+   need a FlareSolverr sidecar.)
+8. **Emby playback defaults.** `PlayDefaultAudioTrack=false` and always-on
+   subtitles on the Emby user, matching whatever `PREFS.md` ends up saying. The
+   acquisition side is enforced by `torbox_find.py`; this is the playback half
+   and it is a UI setting.
+9. Run `/hello-debrid` to write `PREFS.md` before fetching anything.
+
+Then ask them what they want to watch.
+
 ## Default to fetching — don't ask first
 
 Acquiring content is the whole point of this stack. When a specific movie or
@@ -165,3 +210,24 @@ one when a show ends.
 - `sync-state/emby_api_key` — Emby API key
 - Skip-intro pipeline: StrmAssistant fingerprint task daily 03:47, native
   Detect Episode Intros 05:33. New episodes get markers within ~a day.
+
+## Agent configuration
+
+Durable agent configuration stays provider-neutral. No agent is the one this
+repo is built for.
+
+- Shared guidance lives in this file. `CLAUDE.md` only `@`-imports it, because
+  Claude Code looks for that name; it holds no content of its own.
+- Shared assets — skills, and anything reusable added later — live under
+  `.agents/`. That copy is the source of truth.
+- `.claude/skills/` is an adapter surface: a mirror of `.agents/skills/`, kept
+  in the repo so a Claude Code user has the skills on clone with no setup step.
+  It is a copy, never the original. Edit `.agents/`, then re-mirror:
+
+  ```bash
+  rsync -a --delete .agents/skills/ .claude/skills/
+  ```
+
+- Everything else under `.claude/` is local agent state and is gitignored.
+- A provider-specific file only wins for that provider's surface. This file
+  wins everywhere else, and `PREFS.md` wins over this file (see the top).
