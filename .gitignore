@@ -20,12 +20,13 @@ rclone/
 __pycache__/
 *.pyc
 
-# Project skills ship with the repo; everything else under .claude/ is local
-# agent state. The un-ignore of the directory has to come first — git will not
-# descend into an excluded directory to re-include a file inside it — and it
-# overrides a global core.excludesFile rule, which is where a personal
-# ".claude/" usually lives.
+# Project skills and the model pin ship with the repo; everything else under
+# .claude/ is local agent state. The un-ignore of the directory has to come
+# first — git will not descend into an excluded directory to re-include a file
+# inside it — and it overrides a global core.excludesFile rule, which is where
+# a personal ".claude/" usually lives.
 !.claude/
 .claude/*
+!.claude/settings.json
 !.claude/skills/
 !.claude/skills/**

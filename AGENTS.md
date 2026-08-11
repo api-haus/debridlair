@@ -217,7 +217,7 @@ Durable agent configuration stays provider-neutral. No agent is the one this
 repo is built for.
 
 - Shared guidance lives in this file. `CLAUDE.md` only `@`-imports it, because
-  Claude Code looks for that name; it holds no content of its own.
+  Claude Code looks for that name; it holds nothing but Claude-specific notes.
 - Shared assets — skills, and anything reusable added later — live under
   `.agents/`. That copy is the source of truth.
 - `.claude/skills/` is an adapter surface: a mirror of `.agents/skills/`, kept
@@ -228,6 +228,8 @@ repo is built for.
   rsync -a --delete .agents/skills/ .claude/skills/
   ```
 
-- Everything else under `.claude/` is local agent state and is gitignored.
+- `.claude/settings.json` is tracked as well. It pins the model, so a clone
+  needs no setup step for that either. Everything else under `.claude/` is
+  local agent state and is gitignored.
 - A provider-specific file only wins for that provider's surface. This file
   wins everywhere else, and `PREFS.md` wins over this file (see the top).
