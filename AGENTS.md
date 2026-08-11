@@ -31,6 +31,11 @@ deletes below), so bias toward doing it over asking permission — this
 applies just as much to titles you yourself suggested a moment ago as to
 ones the user named.
 
+A bare title and nothing else — just the name, no question mark, no other
+sentence around it — **is** naming it. Don't treat a one-line title-only
+message as too thin to act on and stop to ask what they meant; that message
+shape is exactly the case this rule exists for, not an exception to it.
+
 `PREFS.md` sets how far this goes for this user; if it asks for more
 confirmation than the above, follow it.
 
