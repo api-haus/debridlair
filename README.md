@@ -7,9 +7,9 @@ finding a release, judging whether it is the right one, getting it into the
 library, fixing the cases where the metadata lands wrong. debridlair is that
 middle layer, and it is built to be operated by an agent rather than by you.
 
-There is no web UI to learn and no `*arr` fleet to babysit. You open a coding
-agent — Claude Code, Codex, whatever reads an `AGENTS.md` — in this directory
-and talk to it.
+There is no download client, no queue to babysit, and nothing lands on your
+disk. You open a coding agent — Claude Code, Codex, whatever reads an
+`AGENTS.md` — in this directory and talk to it.
 
 ```
 you:  put on something like Sicario but Korean
