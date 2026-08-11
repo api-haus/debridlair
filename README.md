@@ -7,9 +7,9 @@ finding a release, judging whether it is the right one, getting it into the
 library, fixing the cases where the metadata lands wrong. debridlair is that
 middle layer, and it is built to be operated by an agent rather than by you.
 
-There is no download client, no queue to babysit, and nothing lands on your
-disk. You open a coding agent — Claude Code, Codex, whatever reads an
-`AGENTS.md` — in this directory and talk to it.
+There is no download client and no queue to babysit. You open a coding agent —
+Claude Code, Codex, whatever reads an `AGENTS.md` — in this directory and talk
+to it.
 
 ```
 you:  put on something like Sicario but Korean
@@ -73,9 +73,11 @@ that could never stream inside it are refused at search time — remuxes, absurd
 per-episode sizes, disc-sized movies. A library full of files that stutter is
 worse than a smaller one that plays.
 
-**Language policy.** Original audio, never a dub-only release. Dubbed
-voice-overs — Latino, Castilian, Russian MVO/DVO — are filtered out rather than
-discovered halfway through a film.
+**Language policy.** Out of the box: original audio, never a dub-only release,
+with the Latino and Castilian dubs and the Russian MVO/DVO voice-overs filtered
+out at search time rather than discovered halfway through a film. If you would
+rather have the dub, that is one of the questions you get asked during setup —
+it is a preference, not a principle.
 
 **Skip Intro.** It works, which is not obvious when nothing is on disk: the
 stack fingerprints each episode's audio straight over the remote URL, then lets
@@ -125,8 +127,8 @@ The scripts under `scripts/` are the agent's hands: `torbox_find.py` searches
 and ranks releases, `torbox_add.py` queues a magnet directly, `torbox_sync.py`
 builds the library, `torbox_watch.py` tops up airing shows, `emby_probe.py`
 forces Emby to probe streams it would otherwise ignore until playback, and
-`emby_setup.py` bootstraps a fresh server. Every one of them is usable by hand
-if you would rather drive.
+`emby_setup.py` bootstraps a fresh server. Each runs standalone, if you ever
+want to bypass the agent entirely.
 
 **Things worth knowing if you rebuild this elsewhere:**
 
