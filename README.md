@@ -138,3 +138,7 @@ if you would rather drive.
   thousand files. Leave it alone.
 
 Secrets live in `.env`, chmod 600, never committed.
+
+## License
+
+MIT — see [LICENSE.md](LICENSE.md).
