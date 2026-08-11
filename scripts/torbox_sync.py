@@ -30,7 +30,7 @@ MIN_VIDEO_SIZE = 3 * 1024 * 1024
 # to an unusually long bonus clip) above this size
 MAIN_FILE_MIN_SIZE = 700 * 1024 * 1024
 TV_PAT = re.compile(r"(?:[sS]\d{1,2}[eE]\d{1,3}|\b\d{1,2}x\d{1,3}\b|"
-                    r"[eE][pP]?\d{1,3}\b|[sS]eason\s*\d+)", re.I)
+                    r"\b[eE][pP]?\d{1,3}\b|[sS]eason\s*\d+)", re.I)
 BAD_CHARS = re.compile(r'[<>:"|?*\x00-\x1f]')
 # Leading "SS.EE - title" episode numbers (no SxxExx token) that Emby cannot
 # parse, e.g. "01.02 - Trouble in Lumpy Space.mp4"
@@ -46,7 +46,7 @@ X_TOKEN = re.compile(r"\b(\d{1,2})x(\d{1,3})\b")
 ANIME_EP = re.compile(r"^(?:\[[^\]]*\]\s*)*(?P<show>.+?)\s*-\s*"
                       r"(?:[eE](?P<ep_pfx>\d{1,3})|(?P<ep>\d{2,3}))"
                       r"(?:\s*-\s*\d{2,3})?"
-                      r"(?:\s*v\d+)?\s*(?:[\[\(]|$)")
+                      r"(?:\s*v\d+)?\s*(?:[\[\(]|\.[A-Za-z0-9]{2,4}$|$)")
 # Dot-separated absolute numbering with no dash: "Show.Name.53.v2.1080p..."
 ANIME_EP_DOT = re.compile(
     r"^(?P<show>.+?)\.(?P<ep>\d{2,3})(?:\.v\d+)?(?=\.(?:2160p|1080p|720p|480p|"
@@ -93,6 +93,9 @@ ALIASES = {
     "no hay otra opcion (no other choice)": "no other choice",
     "eojjeolsuga eobsda": "no other choice",
     "darwin jihen": "the darwin incident",
+    "jojos bizarre adventure (2012)": "jojo's bizarre adventure",
+    "jojo's bizarre adventure part 6 - stone ocean": "jojo's bizarre adventure",
+    "jojo no kimyou na bouken part 4 diamond wa kudakenai": "jojo's bizarre adventure",
 }
 # One-off clean_show() misfires that aren't worth a general regex fix:
 # dot-decimal version numbers ("1.11") collapse into spaces, and one release
@@ -107,6 +110,8 @@ TITLE_OVERRIDES = {
     "neon genesis evangelion - the end of evangelion (1995)":
         "Neon Genesis Evangelion - The End of Evangelion (1997)",
     "gojira 1954 rm4k": "Godzilla (1954)",
+    "2021 08 25)evangelion 3 333 you can (not) redo":
+        "Evangelion 3.0 - You Can (Not) Redo (2012)",
 }
 # Series whose releases circulate under more than one title (romaji vs the
 # English broadcast name). Without this the same show lands in two folders and
