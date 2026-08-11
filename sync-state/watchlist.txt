@@ -15,3 +15,5 @@
 
 Chainsmoker Cat | Chainsmoker Cat S{season:02d}E{ep:02d}
 Jujutsu Kaisen (2020) | Jujutsu Kaisen S{season}E{ep:02d}
+Ann Droid (2026) | Ann Droid S{season:02d}E{ep:02d}
+Silo | Silo S{season:02d}E{ep:02d}

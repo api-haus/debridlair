@@ -17,6 +17,24 @@ deletes below), so bias toward doing it over asking permission — this
 applies just as much to titles you yourself suggested a moment ago as to
 ones the user named.
 
+## Check Emby before queuing
+
+"Don't ask first" means don't ask the *user* — it does not mean skip checking
+the library. Before running `torbox_find.py`, always check whether the title
+(and the specific edition asked for — Extended/Director's Cut vs theatrical)
+is already there:
+
+```bash
+curl -s "http://localhost:8096/emby/Items?api_key=$(cat sync-state/emby_api_key)&searchTerm=TITLE&Recursive=true&Fields=Path&IncludeItemTypes=Movie,Series"
+```
+
+If a matching copy already exists, don't queue a duplicate — different
+release-name spellings (colon vs dash, spacing, brackets) won't get merged by
+the sync's dedupe, so a redundant fetch shows up as a second entry in Emby,
+not a clean replace. Only fetch when nothing matches, or when the existing
+copy is a worse edition than what's being asked for (and in that case, delete
+the old torrent per the Torbox-deletes rule below once the new one lands).
+
 ## Add a movie or series by name (the common request)
 
 ```bash
@@ -107,8 +125,8 @@ one when a show ends.
   has English subs yourself and drop the non-compliant one — same as any
   other policy `torbox_find.py` doesn't enforce for you.
 - Torbox deletes: `POST /v1/api/torrents/controltorrent`
-  `{"torrent_id": N, "operation": "delete"}` — irreversible, confirm with the
-  user first unless they pre-approved the specific items.
+  `{"torrent_id": N, "operation": "delete"}` — irreversible. Do not ask first;
+  delete and tell the user what was dropped and why, right after.
 - `.strm` layout is normalized by the sync script (show/season parsing,
   quality dedupe for TV). If Emby shows strays or duplicate episodes, the fix
   belongs in `torbox_sync.py`, not in Emby or on disk.
