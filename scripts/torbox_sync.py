@@ -52,6 +52,11 @@ ANIME_EP_DOT = re.compile(
     r"^(?P<show>.+?)\.(?P<ep>\d{2,3})(?:\.v\d+)?(?=\.(?:2160p|1080p|720p|480p|"
     r"bluray|brrip|bdrip|web-?dl|hdtv|x26[45]|h\.?26[45]|hevc)\b)", re.I)
 ANIME_SEASON = re.compile(r"\b[sS](\d{1,2})\s*$")
+# Season hint from the immediate parent folder ("Attack on Titan Season 2"),
+# used when a batch has one absolute-numbered subfolder per season - the
+# filename alone ("Show - 26.mkv") carries no season, so without this every
+# season collides into "Season 01".
+FOLDER_SEASON = re.compile(r"\bseason\s*(\d{1,2})\b", re.I)
 # Release-name junk: leading site/group prefixes
 SITE_PFX = re.compile(r"^(?:\[[^\]]*\]|www\.?\S+|[\w-]+\.(?:org|com|net|to|io|me|tv|bz|mx)(?:\s*[-–—]+\s*|\s{2,}))", re.I)
 # Cut a show/movie name at the first quality/release tag
@@ -165,9 +170,21 @@ def clean_show(name):
     return name or None
 
 
-def tv_target(item_name, fname):
-    """Return (series_dir, season_dir, filename) for an episode file, or None
-    if it is not recognizably a TV episode."""
+def tv_target(item_name, rel_parts):
+    """Return (series_dir, season, episode, raw_fname, name_tail, renumber_key)
+    for an episode file, or None if it is not recognizably a TV episode.
+
+    raw_fname is set (and name_tail is None) when the original filename
+    already carries an SxxExx token Emby can parse untouched; otherwise
+    name_tail holds the post-"S00E00 - " remainder and the caller builds the
+    final filename once `episode` is final. renumber_key is (show, season)
+    when `episode` is an absolute count borrowed from a season-per-folder
+    batch (see FOLDER_SEASON below) rather than a true in-season number, so
+    the caller can renumber it to a 1-based per-season sequence once every
+    file in the item has been classified.
+    """
+    fname = rel_parts[-1]
+    parent = rel_parts[-2] if len(rel_parts) > 1 else ""
     # Some groups separate every token with underscores rather than spaces or
     # dots ("[Cleo]Shinsekai_yori_-_01_(...)"). Underscore is a word char, so
     # the \s and \b anchors below never fire on those names and the whole
@@ -176,12 +193,14 @@ def tv_target(item_name, fname):
     probe = fname.replace("_", " ")
     season = episode = None
     prefix = ""
+    season_from_folder = False
     for pat in (EP_TOKEN, X_TOKEN):
         m = pat.search(probe)
         if m:
             season, episode = int(m.group(1)), int(m.group(2))
             prefix = probe[:m.start()]
             break
+    raw = season is not None
     if season is None:
         m = DOT_EP_PAT.match(probe)
         if m:
@@ -192,14 +211,24 @@ def tv_target(item_name, fname):
             episode = int(m.group("ep_pfx") or m.group("ep"))
             prefix = m.group("show")
             s = ANIME_SEASON.search(prefix)
-            season = int(s.group(1)) if s else 1
+            if s:
+                season = int(s.group(1))
+            else:
+                fs = FOLDER_SEASON.search(parent)
+                season = int(fs.group(1)) if fs else 1
+                season_from_folder = bool(fs)
     if season is None:
         m = ANIME_EP_DOT.match(probe)
         if m:
             episode = int(m.group("ep"))
             prefix = m.group("show")
             s = ANIME_SEASON.search(prefix)
-            season = int(s.group(1)) if s else 1
+            if s:
+                season = int(s.group(1))
+            else:
+                fs = FOLDER_SEASON.search(parent)
+                season = int(fs.group(1)) if fs else 1
+                season_from_folder = bool(fs)
     if season is None:
         return None
     show = clean_show(prefix) or clean_show(item_name)
@@ -209,11 +238,13 @@ def tv_target(item_name, fname):
     if m and show[:m.start()].strip(STRIP_CHARS):
         show = show[:m.start()].strip(STRIP_CHARS)
         season = 0
+        season_from_folder = False
     show = SHOW_ALIASES.get(show.lower(), show)
-    if not EP_TOKEN.search(probe):
-        stem, ext = os.path.splitext(fname)
-        fname = f"S{season:02d}E{episode:02d} - {emby_friendly_name(stem)}{ext}"
-    return show, f"Season {season:02d}", fname
+    renumber_key = (show, season) if season_from_folder else None
+    if raw:
+        return show, season, episode, fname, None, None
+    stem, ext = os.path.splitext(fname)
+    return show, season, episode, None, f"{emby_friendly_name(stem)}{ext}", renumber_key
 
 
 def load_env():
@@ -272,16 +303,29 @@ def collect(kind, key):
                 and not item.get("download_present"):
             continue
         item_name = sanitize(item.get("name") or f"{kind}-{item['id']}")
+        files = item.get("files") or []
+        # The torrent's own top-level folder can disagree with the item's
+        # display "name" (an indexer-formatted title carries a "[Batch]
+        # (Alt Title)" suffix the actual folder never had) - strip whatever
+        # the files themselves share, not what the item claims, or a
+        # mismatch leaves the raw wrapper folder in every file's path below
+        # (harmless for episodes, which tv_target() rebuilds from scratch,
+        # but it leaves bonus/extras files nested under a stray folder that
+        # Emby reads as a phantom extra season).
+        names = [f["name"] for f in files]
+        top_level = None
+        if names and all("/" in n for n in names):
+            segs = {n.split("/", 1)[0] for n in names}
+            top_level = segs.pop() if len(segs) == 1 else None
         vids = []
-        for f in item.get("files") or []:
+        for f in files:
             ext = os.path.splitext(f.get("short_name") or f["name"])[1].lower()
             if ext not in VIDEO_EXT:
                 continue
             # path of file relative to the item root folder
             rel = f["name"]
-            prefix = (item.get("name") or "") + "/"
-            if rel.startswith(prefix):
-                rel = rel[len(prefix):]
+            if top_level and rel.startswith(top_level + "/"):
+                rel = rel[len(top_level) + 1:]
             rel_parts = [sanitize(p) for p in rel.split("/") if p]
             if not rel_parts:
                 continue
@@ -298,8 +342,26 @@ def collect(kind, key):
         # Classify every file up front so the movie branch can see the whole
         # batch instead of deciding file-by-file: a season pack's leftover
         # bonus clips need to know a real episode already claimed this item.
-        classified = [(f, rel_parts, tv_target(item_name, rel_parts[-1]))
+        classified = [(f, rel_parts, tv_target(item_name, rel_parts))
                       for f, rel_parts in vids]
+
+        # A season-per-folder batch with absolute numbering ("Show Season 2/
+        # Show - 26.mkv") gets its season from the folder but its episode is
+        # still the whole-series absolute count; reset it to a 1-based
+        # in-season sequence now that every file's episode number is known.
+        renumber_groups = {}
+        for i, (_, _, tgt) in enumerate(classified):
+            if tgt and tgt[5]:
+                renumber_groups.setdefault(tgt[5], []).append(i)
+        for idxs in renumber_groups.values():
+            idxs.sort(key=lambda i: classified[i][2][2])
+            for new_ep, i in enumerate(idxs, start=1):
+                f, rel_parts, tgt = classified[i]
+                show, season, _, raw_fname, name_tail, renumber_key = tgt
+                classified[i] = (f, rel_parts,
+                                 (show, season, new_ep, raw_fname, name_tail,
+                                  renumber_key))
+
         any_tv = any(tgt or TV_PAT.search(f["name"]) for f, _, tgt in classified)
 
         non_tv = [(f, rel_parts) for f, rel_parts, tgt in classified
@@ -307,30 +369,53 @@ def collect(kind, key):
         # A bonus clip can legitimately run to a few hundred MB (a lossless
         # anime clean-ED, a making-of documentary), but nothing observed in
         # this library's actual bonus content comes close to a feature's
-        # size — so "by far the largest file in the batch" is a much more
-        # reliable "this is the real movie" signal than the file's own name.
-        max_non_tv_size = max((f.get("size") or 0 for f, _ in non_tv), default=0)
+        # size — so "feature-length" is a much more reliable "this is a real
+        # movie" signal than the file's own name. Every file clearing that
+        # bar counts, not just the single largest: a franchise batch (e.g.
+        # four recap movies with no year in any of their names) bundles
+        # several real movies of similar size, and picking only the biggest
+        # dropped the rest as if they were bonus clips.
         release_ids = set()
         main_titles = {}
         for f, rel_parts in non_tv:
             stem = os.path.splitext(rel_parts[-1])[0]
             title = clean_show(stem)
-            is_biggest = (f.get("size") or 0) == max_non_tv_size \
-                and max_non_tv_size >= MAIN_FILE_MIN_SIZE
-            if is_biggest or (title and YEAR_PAREN_END.search(title)):
+            is_feature = (f.get("size") or 0) >= MAIN_FILE_MIN_SIZE
+            if is_feature or (title and YEAR_PAREN_END.search(title)):
                 release_ids.add(id(f))
                 main_titles.setdefault((title or stem).lower(), title or stem)
         distinct_mains = list(main_titles.values())
 
         for f, rel_parts, tgt in classified:
             if tgt:
-                parts = [sanitize(tgt[0]), tgt[1], tgt[2]]
+                show, season, episode, raw_fname, name_tail, _ = tgt
+                fname = raw_fname if raw_fname is not None \
+                    else f"S{season:02d}E{episode:02d} - {name_tail}"
+                parts = [sanitize(show), f"Season {season:02d}", fname]
                 is_tv = True
             else:
                 is_tv = TV_PAT.search(f["name"]) is not None
                 if is_tv:
                     show_dir = clean_show(item_name) or item_name
-                    parts = [sanitize(show_dir), *rel_parts]
+                    # A bonus clip with no episode number of its own (an
+                    # NCOP/NCED, a "Finale" special) still sits inside a
+                    # "<Show> Season N" folder in a season-per-folder batch;
+                    # fold it into the same normalized Season NN the real
+                    # episodes land in instead of keeping the raw folder
+                    # name, which Emby reads as a phantom extra season.
+                    season_dir = None
+                    for p in rel_parts[:-1]:
+                        fs = FOLDER_SEASON.search(p)
+                        if fs:
+                            season_dir = f"Season {int(fs.group(1)):02d}"
+                            break
+                    if season_dir:
+                        extras_dirs = [p for p in rel_parts[:-1]
+                                       if p.lower() in EXTRAS_DIR_NAMES]
+                        parts = [sanitize(show_dir), season_dir,
+                                *extras_dirs, rel_parts[-1]]
+                    else:
+                        parts = [sanitize(show_dir), *rel_parts]
                     parts[-1] = emby_friendly_name(parts[-1])
                 else:
                     stem = os.path.splitext(rel_parts[-1])[0]
