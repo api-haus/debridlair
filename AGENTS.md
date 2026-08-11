@@ -1,8 +1,22 @@
-# DEBRID — agent operating guide
+# debridlair — agent operating guide
 
-Emby + Torbox debrid streaming stack. Emby 4.8.11 on `:8096` (admin: see
-`.env`), Prowlarr on `:9696`, all state in this directory. Full details in
-`README.md`; secrets in `.env` (chmod 600, never commit, never print).
+This is the operating manual for whoever runs this stack, and that is normally
+you, the agent. The user talks; you fetch, file, and fix. Emby 4.8.11 on
+`:8096` (admin: see `.env`), Prowlarr on `:9696`, all state in this directory.
+Human-facing overview in `README.md`; secrets in `.env` (chmod 600, never
+commit, never print).
+
+@PREFS.md
+
+The user's standing preferences live in `PREFS.md` — audio and subtitle
+policy, size ceilings, how complete a series request is, how much to ask
+before acting. **It is gitignored and it overrides this file on any
+conflict.** When the user tells you to change a preference, edit `PREFS.md`,
+not this file — this file is shared doctrine and must not pick up one person's
+settings. If `PREFS.md` is missing, copy `PREFS.example.md` to it first.
+
+Write to `PREFS.md` only on an explicit instruction. It is not a place to
+record what the user watches or to log inferences about their taste.
 
 ## Default to fetching — don't ask first
 
@@ -16,6 +30,9 @@ has explicitly said to wait. Fetching is cheap and reversible (see Torbox
 deletes below), so bias toward doing it over asking permission — this
 applies just as much to titles you yourself suggested a moment ago as to
 ones the user named.
+
+`PREFS.md` sets how far this goes for this user; if it asks for more
+confirmation than the above, follow it.
 
 ## Check Emby before queuing
 
@@ -45,15 +62,16 @@ python3 scripts/torbox_find.py "Title" --list          # show top 10 releases fi
 python3 scripts/torbox_find.py "Title" -n 3            # queue a specific pick
 ```
 
-For a **series request, always fetch the complete show**: every season plus any
-specials / featurettes / extras that are available. Search the title with `S00`,
-`featurettes`, `extras`, `bonus`, and `documentary` (TV category) and queue
-streamable releases the same way. If no extras are indexed, note that and move
-on.
+How complete a series request is — one season or the whole show with specials
+— is set in `PREFS.md`. When it asks for the complete show, search the title
+with `S00`, `featurettes`, `extras`, `bonus`, and `documentary` (TV category)
+as well, and queue the streamable results the same way. If no extras are
+indexed, note that and move on.
 
-Prefer releases with healthy seeds and English audio (watch for MVO/DVO/Rus
-dubs in Knaben results). Then fast-track instead of waiting for the 15-min
-loop:
+Release quality and language preferences are also in `PREFS.md` — read them
+before picking, because the auto-pick does not enforce all of them (watch for
+MVO/DVO/Rus dubs in Knaben results). Then fast-track instead of waiting for
+the 15-min loop:
 
 ```bash
 python3 scripts/torbox_sync.py
@@ -108,22 +126,16 @@ one when a show ends.
   and clearing it needs root (`sudo umount -l rclone/mnt`). If you must
   `down`, unmount first.
 - Only acquire content through `torbox_find.py` — it enforces the
-  streamability limits that match the 40 Mbit cap (no remuxes; ≤12 GB per
-  episode, ≤30 GB per movie, ≤80 GB per pack). Do not bypass with
-  `--allow-fat` or raw magnets unless the user explicitly asks.
-- TV series requests are complete-show requests: queue every season and any
-  streamable specials / featurettes / extras found via `S00` and related
-  searches, unless the user explicitly asks for only one season.
-- Language policy: original audio only, never dub-only releases (LAT/CAST/
-  MVO/DVO/dubbed without an original/eng track). `torbox_find.py` refuses
-  these; respect it. English subtitles are the user's default. This is a
-  standing policy, not a per-title judgment call — **do not ask the user to
-  choose between subtitle-language variants.** `torbox_find.py`'s auto-pick
-  ranks by resolution/remux/HDR/seeders only and does **not** check subtitle
-  language, so a release with non-English (or missing) subs can win the
-  auto-pick. When that happens, just requeue the best release that actually
-  has English subs yourself and drop the non-compliant one — same as any
-  other policy `torbox_find.py` doesn't enforce for you.
+  streamability limits that match the 40 Mbit cap, and the language policy, at
+  acquisition time (the ceilings themselves are `EP_MAX`/`MOVIE_MAX`/`PACK_MAX`
+  at the top of that script, and `PREFS.md` is what says what they should be).
+  Do not bypass with `--allow-fat` or raw magnets unless the user explicitly
+  asks.
+- `torbox_find.py` enforces only part of `PREFS.md`. Its auto-pick ranks by
+  resolution/remux/HDR/seeders and does **not** check subtitle language, so a
+  release that violates a preference can still win. Whatever the script does
+  not enforce, you enforce — requeue a compliant release and drop the other
+  rather than handing the user a choice they have already made in `PREFS.md`.
 - Torbox deletes: `POST /v1/api/torrents/controltorrent`
   `{"torrent_id": N, "operation": "delete"}` — irreversible. Do not ask first;
   delete and tell the user what was dropped and why, right after.
