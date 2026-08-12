@@ -129,6 +129,7 @@ services:
     volumes:
       - ./emby:/config
       - ./library:/media/library
+      - ./dub/finished:/media/dub
       - type: bind
         source: ./rclone/mnt
         target: /media/torbox
