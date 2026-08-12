@@ -235,6 +235,56 @@ def merge_utterances(events):
     return utterances
 
 
+def find_overdubs(utterances):
+    """Group individually-spoken lines that collide in time with another's.
+
+    A unison line already says who speaks it together, and that mechanism
+    handles it on its own. This finds the separate case where two characters'
+    own, separately-written lines genuinely overlap — the mono, one-speaker-
+    at-a-time render has nowhere to put the second voice but on top of the
+    first, which is what `dub_overdub.py` exists to fix. Overlap is
+    transitive: if A overlaps B and B overlaps C, all three are one case, even
+    where A and C do not directly touch, because they still collide through B
+    in the mixed-down render.
+    """
+    candidates = [utterance for utterance in utterances if not utterance["group"]]
+    parent = {utterance["id"]: utterance["id"] for utterance in candidates}
+
+    def find(node):
+        while parent[node] != node:
+            parent[node] = parent[parent[node]]
+            node = parent[node]
+        return node
+
+    def union(a, b):
+        root_a, root_b = find(a), find(b)
+        if root_a != root_b:
+            parent[root_b] = root_a
+
+    # Sweep in start order, checking each new line only against the lines
+    # still sounding when it begins — the sorted order means nothing later
+    # can overlap one that has already ended.
+    open_lines = []
+    for utterance in candidates:
+        open_lines = [other for other in open_lines if other["end"] > utterance["start"]]
+        for other in open_lines:
+            if other["speaker"] != utterance["speaker"]:
+                union(other["id"], utterance["id"])
+        open_lines.append(utterance)
+
+    groups = {}
+    for utterance in candidates:
+        groups.setdefault(find(utterance["id"]), []).append(utterance)
+    cases = [group for group in groups.values() if len(group) > 1]
+    cases.sort(key=lambda group: min(utterance["start"] for utterance in group))
+
+    assignment = {}
+    for case_id, group in enumerate(cases):
+        for utterance in group:
+            assignment[utterance["id"]] = case_id
+    return assignment
+
+
 def find_scenes(utterances, count):
     """Rank continuous stretches of dialogue by how many characters speak.
 
@@ -277,6 +327,9 @@ def main():
     parser.add_argument("--audit", action="store_true",
                         help="print every rejoin that was inferred rather than "
                              "stated by the actor field, for eyeballing")
+    parser.add_argument("--overdubs", action="store_true",
+                        help="print every case where separate characters' lines "
+                             "collide in time, for scripts/dub_overdub.py")
     args = parser.parse_args()
 
     source = Path(args.source)
@@ -284,6 +337,11 @@ def main():
 
     events = read_events(subtitle_path)
     utterances = merge_utterances(events)
+
+    overdubs = find_overdubs(utterances)
+    for utterance in utterances:
+        utterance["overdub"] = overdubs.get(utterance["id"])
+
     Path(args.output).write_text(json.dumps(utterances, indent=1, ensure_ascii=False))
 
     if args.report:
@@ -313,6 +371,22 @@ def main():
             span = f"{timestamp(scene['start'])}-{timestamp(scene['end'])}"
             print(f"  {span}  {len(scene['speakers'])} chars, {scene['lines']:>3} lines"
                   f"  {', '.join(scene['speakers'])}")
+
+    if args.overdubs:
+        cases = {}
+        for utterance in utterances:
+            if utterance["overdub"] is not None:
+                cases.setdefault(utterance["overdub"], []).append(utterance)
+        print(f"\n{len(cases)} overdub cases (separate characters' lines colliding "
+              f"in time):")
+        for case_id, group in sorted(cases.items()):
+            group = sorted(group, key=lambda utterance: utterance["start"])
+            span = f"{timestamp(group[0]['start'])}-{timestamp(group[-1]['end'])}"
+            speakers = ", ".join(sorted({utterance["speaker"] for utterance in group}))
+            print(f"  case {case_id}  {span}  {speakers}")
+            for utterance in group:
+                print(f"      {timestamp(utterance['start'])}-{timestamp(utterance['end'])}"
+                      f"  {utterance['speaker']:<12} {utterance['text'][:60]}")
 
     return 0
 

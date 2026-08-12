@@ -147,8 +147,9 @@ a CUDA out-of-memory part way through a scene it has already half generated.
 
 The output keeps the Japanese track and adds the dub beside it, so nothing is
 replaced and Emby simply shows an extra audio track. The music and effects bed
-stays stereo; only the voices are mono, and they sit in the centre where screen
-dialogue belongs.
+stays stereo; the voices are mono and, almost always, sit in the centre where
+screen dialogue belongs — the rare exception is a line inside a resolved
+overdub case (below), which gets a stereo position instead.
 
 Every run ends with a drift table comparing each character's pitch in the
 **finished dub track** against their reference. That it reads the finished
@@ -165,6 +166,95 @@ the reference is clean, suspect the fitting stage rather than the clone.
 
 `scripts/dub_script.py --scenes N` ranks the best scenes to preview, by how
 many characters speak in them. A preview with one voice in it proves nothing.
+
+## Giving overlapping dialogue a stereo position
+
+Rare, and worth its own pass rather than a fixed rule in `dub_render.py`: two
+characters' own lines occasionally collide in time — not a unison line, which
+already says who speaks it together, but simply two people talking over each
+other. Summed to the centre, both dubbed voices land on top of one another and
+the scene turns to noise, which is what "loud and unreadable" actually sounds
+like. `dub_script.py` already spots these while it parses the subtitles; the
+rest of this section is what to do once it has.
+
+### Find the cases
+
+Every utterance gets an `"overdub"` field: `null`, or the id of the case it
+belongs to, whenever its span genuinely overlaps a *different* speaker's line.
+A unison line, and anything spoken by a named group, is excluded — that
+mechanism already handles who speaks it. Overlap is transitive: if A overlaps
+B and B overlaps C, all three are one case even where A and C never directly
+touch, because all three still collide in the mixed-down render.
+
+```bash
+python3 scripts/dub_script.py dub/source/s01e01.mkv -o dub/work/s01e01.utterances.json --overdubs
+```
+
+### Look at what the original mix actually did
+
+```bash
+dub/.venv/bin/python scripts/dub_overdub.py dub/work/s01e01.utterances.json \
+    dub/stems/htdemucs/s01e01.audio --all
+```
+
+For each case this draws a stereo-panning spectrogram of the separated vocals
+stem across the case's own span: colour says which side of the stereo field a
+moment of sound sits on, opacity says how loud it is, so silence reads as
+background rather than as a confident claim about where nothing is. Below it,
+a timeline strip shows who is speaking when, and a dot plot shows each
+character's own *solo* pan — measured from their nearest lines outside any
+case — as a starting estimate of where the original placed them.
+
+That estimate is only as good as what the original mix actually did, and it
+is not always anything. On Polar Bear Cafe the vocals stem carries no real
+stereo image anywhere that was checked, not only inside the flagged cases —
+left and right agree to a fraction of a decibel throughout an episode. The
+tool reports that honestly (`solo pan +0.00`) instead of inventing a position,
+and the picture backs up the number rather than just repeating it: a
+spectrogram that reads flat, neutral grey everywhere is the same finding drawn
+out. When that happens, matching the original mix is not an available goal;
+telling the colliding voices apart still is, and that is what resolving the
+case below is actually for.
+
+### Resolve the case
+
+The analysis writes `<slug>.overdubs.json`, one entry per case, holding the
+measured `solo` stats, a naive `proposed` position taken straight from them,
+and a `resolved` block left `null` until someone — a person listening, or an
+LLM reading the image and the numbers — decides. `dub_render.py` only ever
+reads `resolved`; `proposed` is scratch space for that decision, not something
+it renders on its own. Edit the file directly:
+
+```json
+"1": {
+ "resolved": {
+  "PANDA": {"pan": -0.6, "gain_db": 0.0},
+  "PENGUIN": {"pan": 0.6, "gain_db": 0.0}
+ },
+ "status": "resolved",
+ "notes": "why, in one line"
+}
+```
+
+`pan` runs -1 (hard left) to +1 (hard right); `gain_db` is an extra trim on
+top of the usual per-line, scene-matched level, for the rare case where the
+original balance between the two needs correcting rather than just
+separating. Leave a case at `"status": "proposed"` and it renders centred,
+same as before this pipeline existed — `dub_render.py` prints every case it
+finds still unresolved, on every run, so one does not quietly stay centred
+forever.
+
+Re-running `dub_overdub.py` on a case updates its measurement and its image
+without touching a `resolved` block that is already there, the same way
+`voices/understudies.json` survives a re-render.
+
+### Render it
+
+Nothing extra to do. `dub_render.py` finds `<slug>.overdubs.json` beside the
+utterances by default and applies every resolved case's pan and gain
+automatically. A line with no resolved case behaves exactly as it always has:
+full gain, dead centre. `--no-overdubs` renders everything centred regardless,
+for comparison.
 
 ## What the pipeline decides for you
 

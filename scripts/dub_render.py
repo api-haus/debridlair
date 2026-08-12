@@ -88,6 +88,11 @@ RESYNTH_ATTEMPTS = 3
 # processed voice rather than as two people.
 UNISON_SPREAD = 0.045
 
+# Every line lands centred unless scripts/dub_overdub.py has a *resolved*
+# stereo position for it, so the vast majority of an episode renders exactly
+# as it always has.
+CENTRE = (1.0, 1.0)
+
 # Screen dialogue is mixed to the centre, so the centre is ducked across the
 # band a voice occupies. Outside that band, and anywhere off centre, the score
 # and the effects are left alone.
@@ -171,6 +176,20 @@ def resolve_members(members, bank):
         resolved.append(candidates[0])
 
     return resolved
+
+
+def pan_gains(pan):
+    """Equal-power left/right gain for a resolved overdub position.
+
+    -1 is hard left, +1 hard right, 0 dead centre. This is the proper mixing
+    law for an explicit pan choice, and it is deliberately not what a line
+    gets by default: `CENTRE` puts the same sample in both channels at full
+    gain, which is what every line in this pipeline has always done, and nothing
+    changes that unless a case has been resolved for it.
+    """
+    pan = min(1.0, max(-1.0, pan))
+    angle = (pan + 1.0) * (np.pi / 4.0)
+    return float(np.cos(angle)), float(np.sin(angle))
 
 
 def room_for(utterance):
@@ -280,6 +299,8 @@ def speech_level(samples, rate, floor=0.15):
     speech are counted, so the number describes the delivery rather than the
     timing.
     """
+    if samples.ndim > 1:
+        samples = samples.mean(axis=1)     # a stereo dub bus, judged as heard
     width = max(1, int(0.02 * rate))
     usable = (samples.size // width) * width
     if usable == 0:
@@ -379,14 +400,14 @@ def compress_dialogue(dub, rate, ratio):
                            ":attack=8:release=180:knee=6:makeup=1",
                     str(workdir / "post.wav"), "-y"], check=True)
 
-    evened, produced = sf.read(workdir / "post.wav", dtype="float32")
+    evened, produced = sf.read(workdir / "post.wav", dtype="float32", always_2d=True)
     if produced != rate:
         raise SystemExit(f"compressor produced {produced} Hz, expected {rate}")
 
     after = speech_level(evened, rate)
     if after > 0:
         evened = evened * (before / after)
-    return evened[:dub.size].astype("float32")
+    return evened[:dub.shape[0]].astype("float32")
 
 
 def duck_centre(original, rate):
@@ -416,16 +437,18 @@ def duck_centre(original, rate):
     return np.stack([ducked + side, ducked - side], axis=1).astype("float32")
 
 
-def build_track(rendered, bed, voices, rate, air, tuning):
+def build_track(rendered, bed, voices, rate, air, tuning, overdubs=None):
     """Lay each spoken line onto a silent track at its scene position.
 
     The bed stays stereo because it carries the score and the sound design,
     and folding it to mono to match the voices would throw away the stereo
-    image of the original mix. The generated speech is mono, so it goes to
-    the centre, which is where screen dialogue belongs anyway.
+    image of the original mix. The generated speech is mono and almost always
+    goes to the centre, which is where screen dialogue belongs — except for a
+    line inside a resolved overdub case, which `overdubs` places instead.
     """
-    dub = np.zeros(bed.shape[0], dtype="float32")
+    dub = np.zeros((bed.shape[0], 2), dtype="float32")
     report, geometry, lines = [], [], []
+    overdubs = overdubs or {}
 
     for utterance, clip_path in rendered:
         probe = sf.info(str(clip_path))
@@ -480,9 +503,18 @@ def build_track(rendered, bed, voices, rate, air, tuning):
         gain = min(max(line["raw_gain"], centre / MATCH_SPREAD), centre * MATCH_SPREAD)
         gain *= tuning.get(utterance["speaker"], {}).get("gain", 1.0)
 
+        placement = overdubs.get(utterance["id"])
+        if placement is not None:
+            left, right = pan_gains(placement["pan"])
+            gain *= 10 ** (placement.get("gain_db", 0.0) / 20.0)
+        else:
+            left, right = CENTRE
+
         head = int(utterance["start"] * rate)
-        tail = min(head + audio.size, dub.size)
-        dub[head:tail] += audio[:tail - head] * gain
+        tail = min(head + audio.size, dub.shape[0])
+        clip = audio[:tail - head] * gain
+        dub[head:tail, 0] += clip * left
+        dub[head:tail, 1] += clip * right
 
         # The span to take over from the original covers both the line as
         # spoken in Japanese and the dub that replaces it, whichever runs
@@ -491,13 +523,14 @@ def build_track(rendered, bed, voices, rate, air, tuning):
         geometry.append({
             "speaker": utterance["speaker"], "head": head, "tail": tail,
             "replace_head": max(0, head - pad),
-            "replace_tail": min(dub.size, max(tail, int(utterance["end"] * rate)) + pad)})
+            "replace_tail": min(dub.shape[0], max(tail, int(utterance["end"] * rate)) + pad)})
 
         report.append({"id": utterance["id"], "speaker": utterance["speaker"],
                        "generated": round(line["generated"], 2),
                        "available": round(line["available"], 2),
                        "compression": round(line["factor"], 3),
                        "gain": round(float(gain), 3),
+                       "pan": round(placement["pan"], 3) if placement else 0.0,
                        "overflow": round(max(0.0, line["generated"] / line["factor"]
                                              - line["available"]), 2)})
 
@@ -551,7 +584,7 @@ def report_voice_drift(dub, rate, placements, bank):
         if speaker not in bank:
             blended += 1
             continue
-        f0, voiced, _ = librosa.pyin(dub[head:tail], sr=rate, fmin=60, fmax=500,
+        f0, voiced, _ = librosa.pyin(dub[head:tail].mean(axis=1), sr=rate, fmin=60, fmax=500,
                                      frame_length=2048)
         pitches = f0[voiced & ~np.isnan(f0)]
         if pitches.size:
@@ -609,6 +642,11 @@ def main():
     parser.add_argument("--leak", type=float, default=LEAK_GAIN, metavar="GAIN",
                         help="how loud the original performance sits under the dub "
                              f"(default {LEAK_GAIN}, 0 turns it off)")
+    parser.add_argument("--overdubs", metavar="JSON",
+                        help="resolved stereo positions from scripts/dub_overdub.py "
+                             "(default beside the utterances)")
+    parser.add_argument("--no-overdubs", action="store_true",
+                        help="render every line centred, even inside a resolved case")
     args = parser.parse_args()
 
     start, end = parse_timecode(args.start), parse_timecode(args.end)
@@ -650,6 +688,36 @@ def main():
             print(f"IGNORED {stale} rewrites that no longer match their line; "
                   f"re-run dub_adapt.py to carry them over")
 
+    # Where two characters' own lines collide in time, scripts/dub_overdub.py
+    # records a stereo position once a case has been reviewed and resolved.
+    # A case still sitting at "proposed" is left centred like everything
+    # else, and is named here so it keeps surfacing until someone resolves it.
+    overdubs_path = Path(args.overdubs) if args.overdubs else Path(
+        str(args.utterances).replace(".utterances.json", ".overdubs.json"))
+    pan_for = {}
+    if overdubs_path.exists() and not args.no_overdubs:
+        rendered_ids = {utterance["id"] for utterance in utterances}
+        cases = json.loads(overdubs_path.read_text())
+        placed, unresolved = 0, []
+        for case_id, entry in cases.items():
+            if not (set(entry["utterances"]) & rendered_ids):
+                continue                    # this case falls outside what is being rendered
+            if entry["status"] != "resolved":
+                unresolved.append((case_id, entry))
+                continue
+            for utterance in utterances:
+                if utterance["id"] in entry["utterances"]:
+                    placement = entry["resolved"].get(utterance["speaker"])
+                    if placement:
+                        pan_for[utterance["id"]] = placement
+                        placed += 1
+        if placed:
+            print(f"placing {placed} line(s) off-centre from {overdubs_path}")
+        for case_id, entry in unresolved:
+            print(f"  overdub case {case_id} ({', '.join(entry['speakers'])}) at "
+                  f"{entry['span'][0]:.1f}-{entry['span'][1]:.1f}s is not resolved yet, "
+                  f"rendered centred - see {entry['image']}")
+
     # Per-character adjustments, kept beside the bank so they survive a
     # re-render and can be built up by ear over a season.
     tuning_path = Path(args.tuning) if args.tuning else Path(args.voices, "tuning.json")
@@ -687,7 +755,7 @@ def main():
     if not rendered:
         raise SystemExit("nothing was synthesized")
 
-    dub, report, geometry = build_track(rendered, bed, voices, rate, args.air, tuning)
+    dub, report, geometry = build_track(rendered, bed, voices, rate, args.air, tuning, pan_for)
 
     # Demucs splits the mix into exactly two parts, so summing them gives the
     # original back without re-reading the video.
@@ -695,7 +763,7 @@ def main():
 
     original = bed + voices
     mask = replacement_mask(geometry, bed.shape[0], rate)[:, None]
-    replaced = bed * BED_GAIN + dub[:, None] * DUB_GAIN
+    replaced = bed * BED_GAIN + dub * DUB_GAIN
 
     # Only inside the replaced spans. Everywhere else the original is already
     # playing at full level, and adding a copy of it to itself would only
