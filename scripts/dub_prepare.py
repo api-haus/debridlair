@@ -19,9 +19,20 @@ import argparse
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 DEMUCS_MODEL = "htdemucs"
+
+# Torbox's edge routinely drops a TLS handshake or answers 403/520 under load
+# (see torbox_sync.py's api_get for the same fight). A plain curl -sL treats
+# that as success and writes the error page to disk, which then fails
+# confusingly several steps later inside ffmpeg instead of here.
+FETCH_ATTEMPTS = 4
+
+# A real episode is hundreds of MB. Anything under this is an error page or a
+# truncated stream, not a video, however cleanly curl exited.
+MIN_VIDEO_SIZE = 10_000_000
 
 
 def episode_key(path):
@@ -36,17 +47,36 @@ def slug(path):
 
 
 def fetch(source, destination):
-    """Copy a local file, or download whatever the .strm points at."""
-    if destination.exists() and destination.stat().st_size > 0:
+    """Copy a local file, or download whatever the .strm points at.
+
+    A resume check that only asks "does a file exist" trusts a previous
+    failed download exactly as much as a good one. Torbox's edge answers
+    403/520 for real often enough that this needs its own retry, the same
+    fight torbox_sync.py's api_get already has.
+    """
+    if destination.exists() and destination.stat().st_size >= MIN_VIDEO_SIZE:
         return destination
     destination.parent.mkdir(parents=True, exist_ok=True)
 
-    if source.suffix == ".strm":
-        url = source.read_text().strip()
-        subprocess.run(["curl", "-sL", "--retry", "3", "-o", str(destination), url], check=True)
-    else:
+    if source.suffix != ".strm":
         destination.symlink_to(source.resolve())
-    return destination
+        return destination
+
+    url = source.read_text().strip()
+    for attempt in range(FETCH_ATTEMPTS):
+        subprocess.run(["curl", "-sL", "--fail", "--retry", "3",
+                        "-o", str(destination), url])
+        if destination.exists() and destination.stat().st_size >= MIN_VIDEO_SIZE:
+            return destination
+        destination.unlink(missing_ok=True)
+        if attempt < FETCH_ATTEMPTS - 1:
+            print(f"  [retry] fetch of {source.name} came back empty or too "
+                  f"small, retrying", file=sys.stderr)
+            time.sleep(2 ** attempt * 5)
+
+    raise SystemExit(f"could not fetch {source.name}: every attempt came back "
+                     f"empty or too small (Torbox may be having a bad moment; "
+                     f"re-run to pick up where this left off)")
 
 
 def split_stems(video, stem_root, slug_name, venv_python):
