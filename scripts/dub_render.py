@@ -77,6 +77,17 @@ AIR_AMOUNT = 0.35
 # line by line just above.
 COMPRESS_RATIO = 2.5
 
+# How many times a line that cannot fit is generated again before its best
+# draw is accepted. Generation is stochastic and short lines occasionally come
+# out at half the model's usual rate; a second draw is cheaper and better than
+# compressing one of those into a gabble.
+RESYNTH_ATTEMPTS = 3
+
+# How far apart two characters start a line they say together. Real unison is
+# never sample-aligned, and stacking identical takes exactly reads as one
+# processed voice rather than as two people.
+UNISON_SPREAD = 0.045
+
 # Screen dialogue is mixed to the centre, so the centre is ducked across the
 # band a voice occupies. Outside that band, and anywhere off centre, the score
 # and the effects are left alone.
@@ -124,33 +135,141 @@ def fit_to_slot(clip_path, generated, available, rate, semitones=0.0):
     return audio.mean(axis=1), factor
 
 
-def synthesize(tts, utterances, bank, workdir, emo_from_text):
-    """Generate one wav per utterance, in that character's cloned voice."""
+def resolve_members(members, bank):
+    """Match the names in a group label to banked voices.
+
+    A label abbreviates: "BEAR" and "P.BEAR" both mean Polar Bear. A name
+    matches when each of its words begins a word of the banked name, which
+    accepts those and rejects a name that merely shares a letter. Anything
+    ambiguous resolves to nothing, because casting a unison line to the wrong
+    character is worse than leaving it in the original.
+    """
+    import re
+
+    resolved = []
+    for member in members:
+        wanted = [word for word in re.split(r"[^A-Za-z0-9]+", member.upper()) if word]
+        if not wanted:
+            return []
+
+        candidates = []
+        for name in bank:
+            available = [word for word in re.split(r"[^A-Za-z0-9]+", name.upper()) if word]
+            taken, ok = set(), True
+            for word in wanted:
+                hit = next((other for other in available
+                            if other not in taken and other.startswith(word)), None)
+                if hit is None:
+                    ok = False
+                    break
+                taken.add(hit)
+            if ok:
+                candidates.append(name)
+
+        if len(candidates) != 1:
+            return []
+        resolved.append(candidates[0])
+
+    return resolved
+
+
+def room_for(utterance):
+    """Seconds a line may occupy before it collides with the next speaker."""
+    return utterance["window"] + max(0.0, utterance["slack"] - SPEAKER_MARGIN)
+
+
+def synthesize(tts, utterances, bank, workdir, emo_from_text, attempts=RESYNTH_ATTEMPTS):
+    """Generate one wav per utterance, in that character's cloned voice.
+
+    A line that will not fit even at the compression ceiling is generated
+    again rather than squeezed. The overruns left after rewriting the
+    over-long lines were mostly short ones the model happened to draw out —
+    four words taking three seconds, at half the rate it usually speaks. That
+    is a bad sample from a stochastic model, not a line that is too long, and
+    the answer to a bad sample is another sample.
+    """
     rendered = []
     for utterance in utterances:
-        if utterance["group"]:
-            continue                       # a crowd: left in the original audio
-        voice = bank.get(utterance["speaker"])
-        if voice is None:
+        speaking = ([utterance["speaker"]] if not utterance["group"]
+                    else resolve_members(utterance.get("members", []), bank))
+        if not speaking or any(name not in bank for name in speaking):
+            if utterance["group"]:
+                continue                   # a crowd: left in the original audio
             print(f"  no voice for {utterance['speaker']}, left in the original language")
             continue
 
-        output = workdir / f"{utterance['id']:04d}.wav"
         kwargs = {"use_emo_text": True, "emo_alpha": 0.8} if emo_from_text else {}
+        fits = room_for(utterance) * MAX_COMPRESSION
+        takes, retries = [], 0
+        for name in speaking:
+            take = draw_line(tts, bank[name]["path"], utterance["text"], fits,
+                             kwargs, attempts)
+            if take is None:
+                continue
+            takes.append(take[:2])
+            retries = max(retries, take[2])
+
+        if not takes:
+            print(f"  synthesis produced nothing for line {utterance['id']}")
+            continue
+
+        audio, sample_rate = (takes[0] if len(takes) == 1 else lay_together(takes))
+        output = workdir / f"{utterance['id']:04d}.wav"
+        sf.write(output, audio, sample_rate)
+        rendered.append((utterance, output))
+
+        note = f"  (redrawn {retries}x)" if retries else ""
+        if len(takes) > 1:
+            note = f"  (in unison: {', '.join(speaking)}){note}"
+        print(f"  [{utterance['id']:>3}] {utterance['speaker']:<12} "
+              f"{utterance['text'][:52]}{note}")
+
+    return rendered
+
+
+def draw_line(tts, voice_path, text, fits, kwargs, attempts):
+    """Generate one line, redrawing while it will not fit."""
+    best, retries = None, 0
+    for attempt in range(attempts):
         # Asking for no output path returns the audio instead of writing it.
         # Writing it here keeps the pipeline off torchaudio.save, which needs
         # TorchCodec on current torchaudio and fails without it.
-        result = tts.infer(spk_audio_prompt=voice["path"], text=utterance["text"],
+        result = tts.infer(spk_audio_prompt=voice_path, text=text,
                            output_path=None, verbose=False, **kwargs)
         if result is None:
-            print(f"  synthesis produced nothing for line {utterance['id']}")
             continue
         sample_rate, samples = result
-        sf.write(output, np.asarray(samples).astype("float32") / 32768.0, sample_rate)
-        rendered.append((utterance, output))
-        print(f"  [{utterance['id']:>3}] {utterance['speaker']:<12} {utterance['text'][:52]}")
+        # The model hands back a column, one sample per row. soundfile writes
+        # that as mono without complaint, so the shape went unnoticed until two
+        # takes had to be summed and a column broadcast against a row.
+        audio = np.asarray(samples).astype("float32").reshape(-1) / 32768.0
+        length = audio.size / sample_rate
+        if best is None or length < best[0]:
+            best = (length, audio, sample_rate)
+        if length <= fits or fits <= 0.2:
+            break
+        retries = attempt + 1
 
-    return rendered
+    return (best[1], best[2], retries) if best else None
+
+
+def lay_together(takes):
+    """Stack several characters saying the same line at once.
+
+    Two people never start a shared exclamation on the same sample, and laying
+    identical-length takes exactly on top of each other reads as one processed
+    voice rather than two. A short stagger is what makes it a pair. Levels come
+    down together because uncorrelated voices sum louder than one.
+    """
+    rate = takes[0][1]
+    stagger = int(UNISON_SPREAD * rate)
+    length = max(audio.size for audio, _ in takes) + stagger * len(takes)
+
+    stacked = np.zeros(length, dtype="float32")
+    for index, (audio, _) in enumerate(takes):
+        head = index * stagger
+        stacked[head:head + audio.size] += audio
+    return stacked / np.sqrt(len(takes)), rate
 
 
 def speech_level(samples, rate, floor=0.15):
@@ -463,6 +582,9 @@ def main():
     parser.add_argument("--compress", type=float, default=COMPRESS_RATIO, metavar="RATIO",
                         help="how hard to even out the dialogue bus "
                              f"(default {COMPRESS_RATIO}, 1 turns it off)")
+    parser.add_argument("--attempts", type=int, default=RESYNTH_ATTEMPTS, metavar="N",
+                        help="draws allowed for a line that will not fit "
+                             f"(default {RESYNTH_ATTEMPTS}, 1 accepts the first)")
     parser.add_argument("--adaptations", metavar="JSON",
                         help="lines rewritten to fit (default beside the utterances)")
     parser.add_argument("--no-adaptations", action="store_true",
@@ -551,7 +673,8 @@ def main():
 
     workdir = Path(tempfile.mkdtemp())
     print(f"speaking {len(utterances)} lines")
-    rendered = synthesize(tts, utterances, bank, workdir, args.emo_from_text)
+    rendered = synthesize(tts, utterances, bank, workdir, args.emo_from_text,
+                          args.attempts)
     if not rendered:
         raise SystemExit("nothing was synthesized")
 

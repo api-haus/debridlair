@@ -38,6 +38,9 @@ DIALOGUE_STYLE_HINTS = ("main", "dialog", "default", "overlap", "internal",
 GROUP_LABELS = {"everyone", "all", "kids", "both", "both bears", "crowd",
                 "group", "together", "various", "many"}
 
+# What separates the members of a group label that names them.
+GROUP_SEPARATOR = re.compile(r"\s*[/&+]\s*|\s+and\s+", re.IGNORECASE)
+
 # Two events belong to one utterance when the gap between them is under this,
 # in seconds, and the speaker has not changed.
 MERGE_GAP = 0.6
@@ -89,6 +92,19 @@ def is_dialogue_style(style):
 def is_group(speaker):
     lowered = speaker.lower().strip()
     return lowered in GROUP_LABELS or "/" in lowered or "&" in lowered
+
+
+def named_members(speaker):
+    """The characters a group label names, when it names any.
+
+    "BEAR/PENGUIN" says exactly who is speaking, so the line can be spoken by
+    each of them and laid together. "EVERYONE" and "BOTH BEARS" name nobody,
+    and there is no way to know who to cast, so those stay in the original
+    audio. Splitting the label is all that happens here; matching the names to
+    banked voices belongs where the bank is known.
+    """
+    parts = [part.strip() for part in GROUP_SEPARATOR.split(speaker) if part.strip()]
+    return parts if len(parts) > 1 else []
 
 
 def clean_text(raw):
@@ -199,6 +215,7 @@ def merge_utterances(events):
     for index, utterance in enumerate(utterances):
         utterance["id"] = index
         utterance["group"] = is_group(utterance["speaker"])
+        utterance["members"] = named_members(utterance["speaker"]) if utterance["group"] else []
         # How much room the line has before the next speaker starts. The dub
         # may run past its own subtitle window into this slack without
         # colliding, which is what keeps natural pacing possible.
