@@ -542,9 +542,15 @@ def report_voice_drift(dub, rate, placements, bank):
     """
     import librosa
 
-    heard = {}
+    heard, blended = {}, 0
     for span in placements:
         speaker, head, tail = span["speaker"], span["head"], span["tail"]
+        # A unison line is two characters at once, so its pitch belongs to
+        # neither of their references and comparing it to one would report a
+        # drift that is really just the other voice.
+        if speaker not in bank:
+            blended += 1
+            continue
         f0, voiced, _ = librosa.pyin(dub[head:tail], sr=rate, fmin=60, fmax=500,
                                      frame_length=2048)
         pitches = f0[voiced & ~np.isnan(f0)]
@@ -560,6 +566,9 @@ def report_voice_drift(dub, rate, placements, bank):
         flag = "  <- drifted" if abs(drift) > 20 else ""
         print(f"{speaker:<16}{reference:>6}Hz{spoken:>6.0f}Hz{drift:>7.0f}%"
               f"{len(pitches):>8}{flag}")
+    if blended:
+        print(f"{blended} unison lines not compared: two voices at once have no "
+              f"single reference")
 
 
 def main():
