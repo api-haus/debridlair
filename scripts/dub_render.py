@@ -463,6 +463,10 @@ def main():
     parser.add_argument("--compress", type=float, default=COMPRESS_RATIO, metavar="RATIO",
                         help="how hard to even out the dialogue bus "
                              f"(default {COMPRESS_RATIO}, 1 turns it off)")
+    parser.add_argument("--adaptations", metavar="JSON",
+                        help="lines rewritten to fit (default beside the utterances)")
+    parser.add_argument("--no-adaptations", action="store_true",
+                        help="speak the subtitle text as written, however long")
     parser.add_argument("--tuning", metavar="JSON",
                         help="per-character nudges (default voices/tuning.json)")
     parser.add_argument("--tune", action="append", metavar="NAME=key:value,...",
@@ -487,6 +491,34 @@ def main():
     # A character with no clean audio of their own still gets dubbed, in the
     # closest voice the bank holds. A single original-language line dropped
     # into a dubbed scene is more jarring than an approximate voice.
+    # Lines rewritten to fit. A subtitle is written to be read in the time it
+    # is on screen; spoken, the same words often cannot be said that fast by
+    # anyone, and the answer is fewer words rather than a harder squeeze.
+    adaptation_path = Path(args.adaptations) if args.adaptations else Path(
+        str(args.utterances).replace(".utterances.json", ".adaptations.json"))
+    if adaptation_path.exists() and not args.no_adaptations:
+        rewrites = json.loads(adaptation_path.read_text())
+        applied, stale = 0, 0
+        for utterance in utterances:
+            entry = rewrites.get(str(utterance["id"]))
+            if not entry or not entry.get("adapted"):
+                continue
+            # Ids are positions in the utterance list, so re-parsing a subtitle
+            # track moves them. The stored original is what proves this rewrite
+            # still belongs to this line; without the check a changed parse
+            # silently puts one character's words in another's mouth.
+            if entry.get("original") not in (None, utterance["text"]):
+                stale += 1
+                continue
+            utterance["text"] = entry["adapted"]
+            applied += 1
+
+        if applied:
+            print(f"speaking {applied} rewritten lines in place of the subtitle text")
+        if stale:
+            print(f"IGNORED {stale} rewrites that no longer match their line; "
+                  f"re-run dub_adapt.py to carry them over")
+
     # Per-character adjustments, kept beside the bank so they survive a
     # re-render and can be built up by ear over a season.
     tuning_path = Path(args.tuning) if args.tuning else Path(args.voices, "tuning.json")

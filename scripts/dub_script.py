@@ -42,9 +42,20 @@ GROUP_LABELS = {"everyone", "all", "kids", "both", "both bears", "crowd",
 # in seconds, and the speaker has not changed.
 MERGE_GAP = 0.6
 
+# How many other speakers may sit between the halves of one split sentence.
+# Overlapping dialogue puts an interruption in the middle of a line, and past
+# a couple of intervening speakers a rejoin is more likely to be wrong than
+# right.
+INTERLEAVE_DEPTH = 3
+
 # A merge is only allowed when the earlier text does not already end a
 # sentence, unless the later event was unlabelled (an explicit continuation).
 SENTENCE_END = re.compile(r'[.!?…。！？]["”’)]?\s*$')
+
+# The half that continues a sentence cannot be the start of one. A lowercase
+# opening, or a mark that only ever appears mid-sentence, is what distinguishes
+# a genuine continuation from the same character simply speaking again.
+CONTINUES_SENTENCE = re.compile(r'^["“\'(\[]?(?:[a-z]|[,;:—–-])')
 
 
 def parse_time(stamp):
@@ -81,9 +92,18 @@ def is_group(speaker):
 
 
 def clean_text(raw):
-    """Strip ASS override tags and drawing commands, unwrap manual breaks."""
+    """Strip ASS override tags and drawing commands, unwrap manual breaks.
+
+    A trailing lowercase parenthetical is a translator's gloss, not speech.
+    Subtitles carry them so a reader can see the Japanese a pun turns on —
+    "That would be the daily special (higawari)" — and reading one aloud says
+    a romaji word to an audience that came for English. Only trailing ones
+    with no capital letter are taken, which is the shape a gloss has and an
+    ordinary spoken aside does not.
+    """
     text = re.sub(r"\{[^}]*\}", "", raw)
     text = text.replace(r"\N", " ").replace(r"\n", " ").replace(r"\h", " ")
+    text = re.sub(r"\s*\(([a-z][a-z \-']*)\)\s*([.!?…]?)\s*$", r"\2", text)
     return re.sub(r"\s+", " ", text).strip()
 
 
@@ -111,31 +131,70 @@ def read_events(subtitle_path):
         previous_speaker = speaker
 
         events.append({"start": parse_time(fields[1]), "end": parse_time(fields[2]),
-                       "speaker": speaker, "text": text, "continuation": not name})
+                       "speaker": speaker, "text": text, "style": style,
+                       "continuation": not name})
 
     return sorted(events, key=lambda event: event["start"])
 
 
+def joins_sentence(earlier, later):
+    """Is the later event the rest of the earlier one's sentence?
+
+    Failing to merge costs a cold start in the middle of a sentence, which is
+    merely worse. Merging two separate sentences produces a run-on read in one
+    breath and leaves both lines in the wrong slot, which is wrong. So this
+    demands evidence and abstains without it.
+
+    An empty actor field is the fansubber saying outright that the same
+    character continues, and is trusted alone. Absent that, the two halves must
+    agree with each other — the first leaving its sentence open and the second
+    unable to begin one — and must share a style, since a style change means a
+    different context rather than a continued line.
+    """
+    if later["continuation"]:
+        return True
+    return (later["style"] == earlier["style"]
+            and not SENTENCE_END.search(earlier["text"])
+            and bool(CONTINUES_SENTENCE.match(later["text"])))
+
+
 def merge_utterances(events):
-    """Join subtitle events that are one spoken sentence into one utterance."""
+    """Join subtitle events that are one spoken sentence into one utterance.
+
+    The half of a split sentence is not always the previous event. Characters
+    talk over each other, so a fansubber puts the interrupting line between the
+    two halves — one character's aside is written around another's. Looking
+    only at the previous utterance leaves the sentence in two pieces, and each
+    piece is then generated as its own cold start with its own intonation,
+    which is audible as one speaker saying two disconnected fragments.
+    """
     utterances = []
 
     for event in events:
-        joinable = (
-            utterances
-            and utterances[-1]["speaker"] == event["speaker"]
-            and event["start"] - utterances[-1]["end"] <= MERGE_GAP
-            and (event["continuation"]
-                 or not SENTENCE_END.search(utterances[-1]["text"]))
-        )
-        if joinable:
-            utterances[-1]["text"] += " " + event["text"]
-            utterances[-1]["end"] = event["end"]
-            utterances[-1]["events"] += 1
+        # Search back past whoever spoke in between, but only as far as a
+        # sentence that is still open and still close in time.
+        target = None
+        for candidate in reversed(utterances[-INTERLEAVE_DEPTH:]):
+            if candidate["speaker"] != event["speaker"]:
+                continue
+            if event["start"] - candidate["end"] > MERGE_GAP:
+                break
+            if joins_sentence(candidate, event):
+                target = candidate
+            break
+
+        if target is not None:
+            target["text"] += " " + event["text"]
+            target["end"] = max(target["end"], event["end"])
+            target["events"] += 1
+            # Merges driven by orthography rather than by the actor field are
+            # the ones an audit needs to look at.
+            target["inferred"] += 0 if event["continuation"] else 1
         else:
             utterances.append({"start": event["start"], "end": event["end"],
                                "speaker": event["speaker"], "text": event["text"],
-                               "events": 1})
+                               "style": event["style"], "events": 1,
+                               "inferred": 0})
 
     for index, utterance in enumerate(utterances):
         utterance["id"] = index
@@ -191,6 +250,9 @@ def main():
     parser.add_argument("--report", action="store_true", help="print a summary")
     parser.add_argument("--scenes", type=int, metavar="N", default=0,
                         help="also rank the N best multi-character scenes to preview")
+    parser.add_argument("--audit", action="store_true",
+                        help="print every rejoin that was inferred rather than "
+                             "stated by the actor field, for eyeballing")
     args = parser.parse_args()
 
     source = Path(args.source)
@@ -210,6 +272,16 @@ def main():
         print(f"{speech/60:.1f} min of speech across "
               f"{len({utterance['speaker'] for utterance in utterances})} speakers")
         print(f"\nwrote {args.output}")
+
+    if args.audit:
+        # Rejoins taken from the actor field are the fansubber's own word and
+        # need no review. These were inferred from how the text reads, so they
+        # are the ones that could be wrong, and the only way to know is to look.
+        guessed = [u for u in utterances if u["inferred"]]
+        print(f"\n{sum(u['inferred'] for u in guessed)} rejoins inferred from the text "
+              f"(the rest came from the actor field):")
+        for utterance in guessed:
+            print(f"  {utterance['speaker']:<12} {utterance['text'][:96]}")
 
     if args.scenes:
         print(f"\nbest scenes to preview:")

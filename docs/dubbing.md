@@ -100,7 +100,37 @@ and cast her as a male llama. It is plain JSON keyed by character; point the
 `voice` field at any banked name and re-render. `--no-understudies` turns the
 whole mechanism off and leaves those characters in the original language.
 
-### 3. Render
+### 3. Rewrite the lines that cannot be spoken in time
+
+Some lines cannot be delivered however the timing is arranged. A subtitle is
+written to be read in the time it is on screen; spoken, the same words often
+take longer than the shot allows, and English out of Japanese is usually the
+longer of the two. Studios have always answered this by rewriting rather than
+translating — the trade calls it adaptation.
+
+```bash
+python3 scripts/dub_adapt.py dub/work/s01e01.utterances.json \
+    --timing dub/preview/s01e01.dubbed.mkv.timing.json
+```
+
+The threshold is measured rather than assumed. A previous render reports how
+long the model took over each line, which gives the rate it actually speaks
+at, and anything demanding more than that rate times the compression ceiling
+is undeliverable. On Polar Bear Cafe that is 2.33 words per second against a
+3.15 ceiling, flagging 37 lines of 343.
+
+Fill in `adapted` for each line in the file it writes, keeping the meaning and
+the register — it ships the neighbouring lines as context and a word budget —
+then re-render. `--review` reports what each rewrite bought and flags any that
+are still too long. `--no-adaptations` speaks the subtitle text as written.
+
+Rewrites are carried across a re-parse by speaker and text, never by id: an id
+is a position in the utterance list, so re-parsing renumbers them. Carrying
+them by id once put 15 of 37 rewrites on a different character's line, which
+renders perfectly and is silently wrong. `dub_render` refuses any rewrite
+whose stored original no longer matches its line, and says so.
+
+### 4. Render
 
 Speaks each line in its character's cloned voice and mixes it over the bed.
 Point `--from` / `--to` at a scene to preview before committing to an episode.
@@ -142,7 +172,16 @@ many characters speak in them. A preview with one voice in it proves nothing.
   graphics. Without that filter the dub reads out shop signs and menus.
 - **Split sentences are rejoined.** A fansubber breaks one spoken line across
   two subtitle events and labels only the first. Those merge into one utterance
-  so the voice model gets a whole sentence to find prosody in.
+  so the voice model gets a whole sentence to find prosody in — including when
+  another character speaks between the halves, which is how overlapping
+  dialogue gets written down. The rule demands evidence and abstains without
+  it, because failing to merge only costs a cold start while merging wrongly
+  produces a run-on read in the wrong slot. `dub_script.py --audit` prints the
+  rejoins that were inferred from the text and hides the ones the actor field
+  stated outright, so the list to review is short by construction.
+- **Translator glosses are not spoken.** A fansub writes "That would be the
+  daily special (higawari)" so a reader can see the pun the line turns on. Read
+  aloud it says a romaji word to an audience that came for English.
 - **Crowd lines stay in Japanese.** No single cloned voice can produce
   "EVERYONE", and there is no clean reference for a crowd by definition. So do
   the lines of any character the voice bank had to drop.
@@ -184,7 +223,7 @@ many characters speak in them. A preview with one voice in it proves nothing.
   next speaker, and compressed only when it would collide. Compression stops at
   1.35x; past that a line is left to overlap rather than made to gabble.
 
-### Nudging one character
+## Nudging one character
 
 Characters do not all take the same treatment, and the way to find that out is
 to listen. `voices/tuning.json` holds per-character adjustments, applied after
