@@ -17,6 +17,11 @@ prowlarr/
 library/
 rclone/
 
+# The dubbing workspace: a venv, several GB of model weights, downloaded
+# episodes, stems and generated audio. All of it is rebuildable from
+# scripts/dub_*.py, and none of it belongs in git.
+dub/
+
 __pycache__/
 *.pyc
 
