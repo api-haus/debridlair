@@ -136,7 +136,14 @@ def read_events(subtitle_path):
         if len(fields) < 10:
             continue
 
-        style, name = fields[3].strip(), fields[4].strip()
+        # Case is not identity: a fansub batch across many episodes writes
+        # the same character's name in whatever case that release's typesetter
+        # happened to use. Left as-is, "PANDA" and "Panda" become two
+        # different entries everywhere downstream that keys on this string —
+        # the voice bank, the render's bank lookup, tuning.json — which is
+        # how one character ends up cloned from a sliver of their lines under
+        # one spelling while the rest of their appearances sit under another.
+        style, name = fields[3].strip(), fields[4].strip().upper()
         text = clean_text(fields[9])
         if not text or not is_dialogue_style(style):
             continue
