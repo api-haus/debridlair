@@ -23,11 +23,13 @@ Usage:
 import argparse
 import hashlib
 import json
+import re
 import shutil
 import signal
 import subprocess
 import sys
 import tempfile
+import unicodedata
 from pathlib import Path
 
 import numpy as np
@@ -201,6 +203,46 @@ def watch_for_stop(pause_file=None):
 
 def stop_asked(pause_file):
     return _stop_asked or (pause_file is not None and pause_file.exists())
+
+
+# Punctuation the tokenizer has no token for and that NFKD will not decompose,
+# because it is not an accented letter — nothing to strip. The em dash is
+# absent deliberately: the tokenizer already takes it as a hyphen.
+UNSPEAKABLE = {"―": "-", "−": "-", "…": "...", " ": " "}
+
+
+def speakable(text, say_as):
+    """The line as the model should receive it, which is not what a reader gets.
+
+    The tokenizer splits on what it has seen, and it has seen English. An
+    accented letter is not in any pair it knows, so it breaks off alone —
+    `café` arrives as CA, F, É — and the model, holding a character with no
+    English pronunciation, guesses. That is where "caf" and "cafu" come from,
+    and why the same word sometimes comes out right: it is a guess each time.
+    Folded to ASCII the word arrives as CA, FE, which the model has seen.
+
+    Folding is not always enough. English spelling does not determine English
+    pronunciation, so a word can tokenize cleanly and still be read wrong, and
+    for those there is a respelling — chosen by listening, because nothing
+    about the tokens predicts it.
+
+    Only synthesis sees any of this. The subtitle track keeps the real word.
+    """
+    text = "".join(UNSPEAKABLE.get(c, c) for c in text)
+    folded = "".join(c for c in unicodedata.normalize("NFKD", text)
+                     if not unicodedata.combining(c))
+    if not say_as:
+        return folded
+
+    def swap(match):
+        word = match.group(0)
+        spoken = say_as[word.lower()]
+        # A respelling is lower case in the lexicon; a word that was capitalised
+        # in the line stays capitalised, so sentence case survives.
+        return spoken.capitalize() if word[:1].isupper() else spoken
+
+    return re.sub(r"\b(?:%s)\b" % "|".join(map(re.escape, say_as)),
+                  swap, folded, flags=re.IGNORECASE)
 
 
 def clip_stamp(text, references, fits, emo):
@@ -476,7 +518,7 @@ def room_for(utterance):
 
 
 def synthesize(tts, utterances, bank, workdir, emo_from_text, attempts=RESYNTH_ATTEMPTS,
-               clips=None, pause_file=None):
+               clips=None, pause_file=None, say_as=None):
     """Generate one wav per utterance, in that character's cloned voice.
 
     A line that will not fit even at the compression ceiling is generated
@@ -491,7 +533,7 @@ def synthesize(tts, utterances, bank, workdir, emo_from_text, attempts=RESYNTH_A
     directory the lines already drawn stay drawn, and a stop costs the one line
     in the model's hands rather than the quarter hour behind it.
     """
-    rendered, reused = [], 0
+    rendered, reused, respelled = [], 0, 0
     for utterance in utterances:
         if stop_asked(pause_file):
             raise Paused()
@@ -512,7 +554,11 @@ def synthesize(tts, utterances, bank, workdir, emo_from_text, attempts=RESYNTH_A
         kwargs = {"use_emo_text": True, "emo_alpha": 0.8} if emo_from_text else {}
         fits = room_for(utterance) * MAX_COMPRESSION
 
-        stamp = clip_stamp(utterance["text"], [bank[name]["path"] for name in speaking],
+        # What the model is given, which is not always what the subtitle says.
+        # Stamped on the clip, so changing how a word is spoken redraws the
+        # lines carrying it and leaves the rest of the episode alone.
+        spoken = speakable(utterance["text"], say_as)
+        stamp = clip_stamp(spoken, [bank[name]["path"] for name in speaking],
                            fits, kwargs)
         drawn = (clips or workdir) / f"{utterance['id']:04d}.wav"
         beside = drawn.with_suffix(".json")
@@ -524,7 +570,7 @@ def synthesize(tts, utterances, bank, workdir, emo_from_text, attempts=RESYNTH_A
 
         takes, retries = [], 0
         for name in speaking:
-            take = draw_line(tts, bank[name]["path"], utterance["text"], fits,
+            take = draw_line(tts, bank[name]["path"], spoken, fits,
                              kwargs, attempts)
             if take is None:
                 continue
@@ -551,11 +597,15 @@ def synthesize(tts, utterances, bank, workdir, emo_from_text, attempts=RESYNTH_A
         note = f"  (redrawn {retries}x)" if retries else ""
         if len(takes) > 1:
             note = f"  (in unison: {', '.join(speaking)}){note}"
+        if spoken != utterance["text"]:
+            respelled += 1
         print(f"  [{utterance['id']:>3}] {utterance['speaker']:<12} "
               f"{utterance['text'][:52]}{note}")
 
     if reused:
         print(f"  kept {reused} lines drawn before the last stop")
+    if respelled:
+        print(f"  respelled {respelled} lines for the tokenizer; the subtitle keeps the real words")
     return rendered
 
 
@@ -1110,6 +1160,9 @@ def main():
                              "successful render instead of clearing it")
     parser.add_argument("--pause-file", metavar="PATH",
                         help="stop between lines while this file exists")
+    parser.add_argument("--lexicon", metavar="JSON",
+                        help="how to spell words the model says wrong, for the "
+                             "model only (default <voices>/lexicon.json)")
     parser.add_argument("--sequential", action="store_true",
                         help="queue colliding lines instead of stacking them")
     args = parser.parse_args()
@@ -1222,6 +1275,16 @@ def main():
     roles = sorted({utterance["role"] for utterance in utterances
                     if utterance.get("role")})
 
+    # Accents are folded for every line regardless; this is only for words the
+    # fold leaves the model still saying wrong. Kept beside the bank, because
+    # which words those are is a property of the show being dubbed.
+    lexicon_path = Path(args.lexicon) if args.lexicon else Path(args.voices, "lexicon.json")
+    say_as = {}
+    if lexicon_path.exists():
+        say_as = {word.lower(): spoken.lower()
+                  for word, spoken in json.loads(lexicon_path.read_text()).items()}
+        print("said as: " + "; ".join(f"{w} -> {s}" for w, s in say_as.items()))
+
     understudy_path = Path(args.voices, "understudies.json")
     if understudy_path.exists() and not args.no_understudies:
         for speaker, entry in json.loads(understudy_path.read_text()).items():
@@ -1269,7 +1332,7 @@ def main():
     print(f"speaking {len(utterances)} lines")
     try:
         rendered = synthesize(tts, utterances, bank, workdir, args.emo_from_text,
-                              args.attempts, clips, pause_file)
+                              args.attempts, clips, pause_file, say_as)
     except Paused:
         held = len(list(clips.glob("*.wav"))) if clips else 0
         print(f"\npaused with {held} of {len(utterances)} lines drawn; nothing "
@@ -1376,7 +1439,14 @@ def main():
                         "-metadata:s:a:0", "title=English (AI dub)",
                         "-metadata:s:a:0", "language=eng",
                         "-metadata:s:a:1", "title=Japanese",
+                        # The original carries its own default flag out of the
+                        # source, and setting one here does not clear the other:
+                        # both tracks then claim to be the default and which
+                        # language a player picks is its own business. Cleared
+                        # explicitly, so the dub is the default and the original
+                        # is the one you choose.
                         "-disposition:a:0", "default",
+                        "-disposition:a:1", "0",
                         *tags, "-disposition:s:0", "default",
                         *span, str(staged), "-y"], check=True)
         print(f"\nmuxed {len(sources)} subtitle track(s): "
