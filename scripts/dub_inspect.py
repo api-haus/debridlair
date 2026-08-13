@@ -34,7 +34,13 @@ import soundfile as sf
 
 MELS = 96
 HOP = 512
-TOP_DB = 80
+
+# Quietest level the comparison looks at, in dBFS. A floor is needed because
+# digital silence is minus infinity and would swamp any mean it fell into.
+FLOOR = -100.0
+
+# Range the panels are drawn over.
+SHOWN = -90.0
 
 
 def extract_track(video, index, rate=44100):
@@ -46,15 +52,36 @@ def extract_track(video, index, rate=44100):
 
 
 def mel_spectrogram(audio, rate):
+    """A track's mel spectrogram in dBFS, on an absolute scale.
+
+    Referenced to full scale rather than to the track's own peak, which is the
+    only way two of these can be subtracted from each other. Referenced to its
+    own maximum each track is normalised by a different amount, so the
+    difference between them reports the gap between their peaks rather than
+    anything about the mix — and it reads near zero exactly when the two
+    happen to peak together, which is the case that needs checking least.
+
+    That was not theoretical: on a voice-over render whose two tracks peak
+    3.4 dB apart, the self-referenced version reported every band 8 to 10 dB
+    out and flagged all of them, on a mix whose real half-second difference
+    ran from -2.6 to +5.6 dB with a median of +0.6.
+    """
     import librosa
 
     power = librosa.feature.melspectrogram(y=audio, sr=rate, n_mels=MELS,
                                            hop_length=HOP, fmax=rate / 2)
-    return librosa.power_to_db(power, ref=np.max, top_db=TOP_DB)
+    return np.maximum(librosa.power_to_db(power, ref=1.0, top_db=None), FLOOR)
 
 
 def band_report(reference, dubbed, rate):
-    """Mean difference per frequency band, in decibels."""
+    """Mean difference per frequency band, in decibels.
+
+    A mean of decibels rather than of energy, so a quiet frame counts as much
+    as a loud one. That is the right weighting for finding something the
+    pipeline is doing everywhere and the wrong one for judging loudness: a
+    small constant offset here can be the two tracks' codecs rather than the
+    mix, and a level question is better asked of the waveform.
+    """
     import librosa
 
     edges = librosa.mel_frequencies(n_mels=MELS, fmax=rate / 2)
@@ -132,8 +159,8 @@ def main():
     extent = [0, seconds, 0, MELS]
     figure, axes = plt.subplots(3, 1, figsize=(14, 10), sharex=True)
     for panel, (data, title, kwargs) in enumerate([
-            (reference, "original", dict(cmap="magma", vmin=-TOP_DB, vmax=0)),
-            (dubbed, "dubbed", dict(cmap="magma", vmin=-TOP_DB, vmax=0)),
+            (reference, "original", dict(cmap="magma", vmin=SHOWN, vmax=0)),
+            (dubbed, "dubbed", dict(cmap="magma", vmin=SHOWN, vmax=0)),
             (difference, "difference (dub minus original, dB)",
              dict(cmap="coolwarm", vmin=-24, vmax=24))]):
         image = axes[panel].imshow(data, origin="lower", aspect="auto",
@@ -158,9 +185,17 @@ def main():
         during, between = stability
         print(f"\nbed below the voice band: {during:+.1f} dB while speaking, "
               f"{between:+.1f} dB between lines")
-        if abs(during - between) > 1.0:
+        # A voice-over ducks the original every time the reader speaks, so the
+        # bed moving is that mode working. Saying otherwise would flag the
+        # design as the fault on every correct render.
+        voiceover = timing[0].get("mix") == "voiceover" if timing else False
+        if abs(during - between) > 1.0 and not voiceover:
             print(f"  the bed moves {abs(during - between):.1f} dB as lines start and stop, "
                   f"which is the score breathing under the dialogue")
+        elif voiceover:
+            print(f"  a voice-over ducks the original while the reader speaks, so a "
+                  f"gap here\n  is that duck. It reads smaller than the ducking depth "
+                  f"because the reader's\n  own voice fills the band back in.")
 
     print(f"\nwrote {args.output}")
     return 0
