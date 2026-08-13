@@ -276,7 +276,10 @@ def render(plan, entry):
     command = [str(plan["python"]), "-u", str(ROOT / "scripts/dub_render.py"),
                str(entry["utterances"]), str(plan["voices"]), str(entry["stems"]),
                "--video", str(entry["video"]), "-o", str(entry["output"]),
-               "--clips", str(entry["clips"]),
+               # Kept rather than spent, so a line that comes out wrong can be
+               # redrawn on its own later. Without them a one-word repair costs
+               # the whole episode again. See scripts/dub_repair.py.
+               "--clips", str(entry["clips"]), "--keep-clips",
                "--pause-file", str(plan["work"] / PAUSE), *plan["options"]]
     if plan["queue"]:
         command = ["processqueue", plan["queue"], *command]
