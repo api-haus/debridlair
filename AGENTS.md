@@ -205,6 +205,14 @@ fits the timing offset between the two before anything else runs. A subtitle
 track that is a second out dubs the whole episode over the wrong shots and
 every later stage accepts it happily.
 
+Settle the show's hard words before the season rather than after it, because a
+word in the title is in every episode. `scripts/dub_saycheck.py` says which
+words a season spells outside ASCII and how often, `dub_saytest.py` speaks the
+candidate spellings, and `dub_sayhear.py` transcribes what came out so the
+verdict is not one ear at midnight. The answer goes in `dub/voices/lexicon.json`
+and the walkthrough is in `docs/dubbing.md`. Never assume the ASCII fold is
+right: on IndexTTS-2.5 it rescues some words and wrecks others.
+
 Dubbing never writes to `library/`. It works on local copies under `dub/`, one
 show per working directory (`--work dub/<show>`) — episodes are named by
 season and episode number, so two shows in one directory overwrite each other.
@@ -221,6 +229,20 @@ being spoken. `/dub` drives it; the skill is in `.agents/skills/dub/`.
 python3 scripts/dub_season.py --status                  # every prepared season
 python3 scripts/dub_season.py "Shirokuma Cafe"          # run, or carry on
 python3 scripts/dub_season.py --halt                    # stop whatever is going
+```
+
+When the user says a line in a finished episode sounds wrong and gives a
+timecode, that is `scripts/dub_repair.py`, never a re-render of the episode.
+It finds the line at that time, redraws only what changed, and reuses every
+other clip untouched — so the fix costs one line rather than a quarter hour,
+and the three hundred lines around it do not come back as fresh draws of a
+stochastic model. `--redraw` for a bad read, `--rebuild` after a lexicon or
+adaptation edit, `--verify` to confirm the mix treated no other line
+differently.
+
+```bash
+python3 scripts/dub_repair.py "Polar Bear Cafe" 12 --at 8:32   # which line is this?
+python3 scripts/dub_repair.py "Polar Bear Cafe" 12 --at 8:32 --redraw
 ```
 
 To hand a finished dub to somebody, `scripts/dub_share.py <show> <episode>`

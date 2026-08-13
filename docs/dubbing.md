@@ -181,13 +181,75 @@ them by id once put 15 of 37 rewrites on a different character's line, which
 renders perfectly and is silently wrong. `dub_render` refuses any rewrite
 whose stored original no longer matches its line, and says so.
 
-### 4. Render
+### 4. Settle how the hard words are said
+
+Once per show, before the season. Most shows have a handful of words the model
+reads wrong every time it meets them, and a word in the title is one it will
+meet in every episode — Polar Bear Cafe says "café" 253 times.
+
+```bash
+python3 scripts/dub_saycheck.py dub/work          # which words, how often
+python3 scripts/dub_saytest.py POLAR_BEAR -o dub/clips/say --takes 2 \
+    "Welcome to Polar Bear's Café!" "Welcome to Polar Bear's Cafe!" \
+    "SLOTH:: Here's my résumé..."                 # speak the candidates
+python3 scripts/dub_sayhear.py dub/clips/say --model medium.en   # what came out
+```
+
+`dub_saycheck.py` inventories every word the season spells outside ASCII and
+shows how the tokenizer splits it. A word held as one piece is one the model
+has heard; a word that shatters into single characters is one it assembles a
+sound for, and that is where a guess comes from. Note what it *cannot* tell
+you: 2.5's tokenizer is a byte-level BPE, so nothing is ever an unknown token
+and no spelling ever fails to encode. On IndexTTS-2 that question was the whole
+check. Here it always answers yes and means nothing.
+
+`dub_saytest.py` speaks the candidates. A line may name its own voice —
+`SLOTH:: Here's my résumé...` — because a season's hard words are spread across
+its cast and loading the model costs more than every line in the test put
+together. Two takes minimum: generation is stochastic and one good draw of a
+bad spelling proves nothing.
+
+`dub_sayhear.py` transcribes what came out with Whisper, which heard the audio
+without knowing which spelling produced it. That is evidence rather than
+opinion, and it disagrees with the ear often enough to be worth the minute. It
+does not replace listening — it decides which clips are worth listening to.
+
+**Lines go to the model as written.** There used to be an unconditional ASCII
+fold here, and on IndexTTS-2 it was right — that tokenizer had no token for an
+accented letter. 2.5 holds ` café` whole, and folding it hands the model a
+different token to guess at. Measured over this show the fold wrecked far more
+than it rescued: `caffè` became "calf latte", `à la mode` became "Allah mode",
+`café` is 253 lines that never needed touching. Do not reintroduce it as a
+default, in either direction — "always fold" and "never fold" are both guesses,
+and the tools above are how you stop guessing.
+
+What is left is `dub/voices/lexicon.json`, which names the words the model reads
+wrong as written. Two forms:
+
+- **A respelling**: `"família": "familia"`. Use when some other spelling of the
+  word is simply read better.
+- **An ARPABET annotation**, which 2.5 is trained to obey and which says the
+  sound outright instead of hoping a spelling lands:
+  `"göreme": "<goreme|G ER1 EH0 M EH0>"`. The word left of the bar is discarded
+  — only the phones are spoken — so it is there for whoever reads the file. Use
+  it for proper nouns, where no English spelling implies the right sound.
+
+Keys match whole words, case-insensitively, and a key may be a phrase
+(`"a la mode"`) when the word alone is too common to touch. The lexicon lives
+beside the voice bank because which words are hard is a property of the show,
+not of the model. Only synthesis sees any of this; the subtitle track keeps the
+real spelling throughout.
+
+A word that comes out wrong in a *finished* episode does not need any of this
+re-run over the season. See "Repairing a line in a finished episode" below.
+
+### 5. Render
 
 Speaks each line in its character's cloned voice and mixes it over the bed.
 Point `--from` / `--to` at a scene to preview before committing to an episode.
 
 ```bash
-processqueue gpu dub/.venv/bin/python scripts/dub_render.py \
+processqueue gpu:11 dub/.venv/bin/python scripts/dub_render.py \
     dub/work/s01e01.utterances.json dub/voices/ dub/stems/htdemucs/s01e01.audio \
     --video dub/source/s01e01.mkv --from 20:38 --to 21:52 -o dub/preview/cafe.mkv
 ```
@@ -221,7 +283,7 @@ the reference is clean, suspect the fitting stage rather than the clone.
 `scripts/dub_script.py --scenes N` ranks the best scenes to preview, by how
 many characters speak in them. A preview with one voice in it proves nothing.
 
-### 5. Render the rest of the season
+### 6. Render the rest of the season
 
 One episode is a quarter hour of GPU, so a season is most of a working day of
 it, and nobody sits through that in one go. `scripts/dub_season.py` runs the
@@ -242,7 +304,7 @@ It reads one plan file, and that file is the whole memory of the run:
   "source": "dub/source",
   "library": "dub/finished/tv",
   "python": "dub/.venv/bin/python",
-  "queue": "gpu",
+  "queue": "gpu:11",
   "options": []
 }
 ```
@@ -296,8 +358,10 @@ and a resumed render reuses every clip whose stamp still matches. So the price
 of stopping is the line in the model's hands, not the quarter hour behind it.
 The stamp is what makes reuse safe: change an adaptation, or re-mint the voice
 bank, and the affected lines redraw instead of quietly keeping the old take.
-The clips are cleared once the episode is finished — `--keep-clips` on
-`dub_render.py` keeps them.
+A season keeps its clips after the episode is finished — `dub_season.py` passes
+`--keep-clips` — because they are also what makes a repair cost one line rather
+than an episode. They run about 120 KB a line, so an episode is some 40 MB and
+a season a couple of GB.
 
 **A killed render never leaves a broken episode.** The mux writes to a hidden
 `.partial` file beside the finished name and moves it into place only when
@@ -307,6 +371,53 @@ lands first, so the episode and its report always appear together.
 Asked to stop while an episode is already mixing, the render finishes it. That
 part is CPU and minutes; the GPU is already idle, which is what the stop was
 for. It then exits without starting another.
+
+### Repairing a line in a finished episode
+
+Something always comes out wrong, and it is always found the same way: watching
+the episode and noting the time. `scripts/dub_repair.py` answers that note.
+
+```bash
+python3 scripts/dub_repair.py "Polar Bear Cafe" 12 --at 8:32           # what is here?
+python3 scripts/dub_repair.py "Polar Bear Cafe" 12 --at 8:32 --redraw  # draw it again
+python3 scripts/dub_repair.py "Polar Bear Cafe" 12 --rebuild --verify  # after a lexicon edit
+```
+
+With no `--redraw` or `--rebuild` it only reports, which is most of what it is
+for — a timecode is not a line number and the first question is always which
+line that even was. It looks 2.5 s either side, because a note taken while
+watching lands on the line being heard and nobody's thumb is frame accurate.
+
+Which flag depends on what is wrong:
+
+- **The model read it badly** — right words, poor delivery. `--redraw` deletes
+  those clips so they are drawn again. Generation is stochastic; another draw
+  is a genuinely different read.
+- **A word is said wrong** — fix it in `dub/voices/lexicon.json` and
+  `--rebuild`. The clip stamp carries the spoken text, so every line carrying
+  that word redraws itself and nothing else does. One edit repairs the word
+  across the season, an episode at a time.
+- **The line should say something else** — edit its `adapted` text and
+  `--rebuild`. Same mechanism.
+
+Only the changed lines reach the GPU; the rest come back as the identical wav.
+The command is built from the season plan rather than typed out, because a
+repair that passed even one option differently would rebuild the episode to a
+different mix, which is the whole thing this avoids.
+
+**What a repair does to the rest of the episode.** Not nothing, and worth
+knowing exactly. Measured on a scene of 57 lines with one redrawn: every other
+line came back with identical placement, gain, compression, pan and overflow —
+`--verify` is what checks that, by diffing the timing reports — and the mixed
+audio outside the repair moved by at most **-71 dBFS**, about 65 dB under the
+programme. That comes from the dialogue compressor, which levels the voice bus
+as one piece and so notices that one line on it is now different. The finished
+MKV then re-encodes to AAC and adds its own quantisation noise on top.
+
+So a repaired episode is not bit-identical to the one it replaces, and no
+amount of caching would make it so while the bus is levelled as a whole. It is
+inaudible, it is measured rather than asserted, and `--verify` reports the part
+that would actually matter: whether the mix treated any other line differently.
 
 ### Is the season coming out well
 
@@ -978,8 +1089,27 @@ uv pip install --python dub/.venv/bin/python torch torchaudio --torch-backend=cu
 uv pip install --python dub/.venv/bin/python numpy demucs soundfile librosa
 git clone https://github.com/index-tts/index-tts.git dub/index-tts
 uv pip install --python dub/.venv/bin/python -e ./dub/index-tts
-dub/.venv/bin/hf download IndexTeam/IndexTTS-2 --local-dir=dub/checkpoints_2
+dub/.venv/bin/hf download IndexTeam/IndexTTS-2.5 --local-dir=dub/checkpoints_2_5
+python3 scripts/dub_checkpoints.py dub/checkpoints_2_5
 ```
+
+Check the download before anything loads it. `hf download` has returned 0
+having written a file of exactly the right size that no `torch.load` will open,
+and the damage surfaces twenty minutes later in the middle of a model load,
+where it reads like a bug in the renderer. `dub_checkpoints.py` checksums every
+file against the hub and then opens every torch archive, because those catch
+different faults: the checksum catches a bad transfer, and opening the archive
+catches a file that is byte-perfect and still unreadable by the torch in this
+venv.
+
+If a file fails repeatedly, and each retry produces the right size and a
+*different* checksum, stop re-downloading and suspect the disk. Four fetches of
+`gpt.pth` were corrupted here by a full btrfs — `Device unallocated: 1.00MiB`,
+with 233 GB still free inside existing block groups, so nothing could allocate
+a new chunk and large writes failed as `OSError: [Errno 5]` while `btrfs device
+stats` reported zero errors on every counter. `sudo btrfs balance start
+-dusage=50 <mount>` reclaims the slack. Writing a few GiB of `os.urandom` to
+the filesystem is the quickest way to tell a bad transfer from a bad disk.
 
 `ffmpeg` needs the `rubberband` filter, which is what fits a line to its slot
 without the chipmunk artefacts `atempo` leaves on speech.
