@@ -57,22 +57,46 @@ Confirm what actually stopped, from `--status`, rather than from having asked.
 python3 scripts/dub_season.py "<show>" >> dub/<work>/season.log 2>&1
 ```
 
-Run it in the background, then arm a monitor on the log so each episode
-reports itself instead of you polling:
+Run it in the background, then arm a monitor on the log so it tells you when
+something is worth knowing instead of you polling:
 
 ```
-tail -f -n0 dub/<work>/season.log | grep -E --line-buffered \
-  "^=== S01E|lines placed|^paused\.|failed with exit|^Traceback|is fully rendered"
+tail -f -n0 dub/<work>/season.log | python3 scripts/dub_watch_log.py
 ```
+
+That filter stays silent through a normal episode and speaks for a tight one,
+a drifted character, an unresolved overdub, a stale adaptation, a failure or a
+pause. Do not replace it with a grep that matches every episode: announcing
+all fifty trains the reader to skim, which is the state you least want them in
+on the render that actually went wrong.
 
 Running the tool clears the `PAUSE` file by itself — running it *is* the
 instruction to run. Do not delete the file by hand and do not pass a flag to
 override it.
 
 Then say what happened per episode as it lands: lines placed, lines still
-overrunning, and anything in the drift table marked `<- drifted`. A number of
-overruns in the high teens is worth flagging for a listen; drift outside ±10%
-on a character with more than a few lines is worth investigating.
+overrunning, and anything in the drift table marked `<- drifted`. Drift
+outside ±10% on a character with more than a few lines is worth investigating.
+
+Do not read a trend off two or three episodes. Overruns swing between 3 and
+19 on this show with no trend at all, and calling a good pair an improvement
+only means retracting it when the next one spikes. `--quality` prints the
+whole season at once, from each render's own timing report:
+
+```bash
+python3 scripts/dub_season.py "<show>" --quality
+```
+
+The column that predicts trouble is **squeezed**, the share of lines that had
+to be compressed — not the line count. Around a quarter is comfortable; a
+third or more is the episode to send back through `dub_adapt.py`.
+
+When the user wants to judge one rather than read about it, cut the lines out
+and let them listen. A table cannot say whether tight sounds bad:
+
+```bash
+python3 scripts/dub_clips.py "<show>" --worst 3 --tightest 2 --clean 1
+```
 
 ### When the title does not resolve
 

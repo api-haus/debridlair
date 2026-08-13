@@ -305,6 +305,59 @@ Asked to stop while an episode is already mixing, the render finishes it. That
 part is CPU and minutes; the GPU is already idle, which is what the stop was
 for. It then exits without starting another.
 
+### Is the season coming out well
+
+```bash
+python3 scripts/dub_season.py "Shirokuma Cafe" --quality
+```
+
+One row per finished episode, read off the timing report each render leaves
+beside its episode, so it costs nothing and cannot disagree with what was
+actually produced.
+
+Watch the **squeezed** column rather than the line count. Measured across the
+first ten episodes of a season, the share of lines that had to be compressed
+tracks the overruns far better than length does — r = +0.84 against +0.52 for
+length. An episode is not tight because it is long, it is tight because its
+dialogue is dense, and compression share says so directly. Around a quarter
+is comfortable and lands two to seven overruns; a third or more lands fifteen
+to twenty, and that is the episode to send back through `dub_adapt.py` rather
+than to re-render.
+
+### Hearing what the table points at
+
+A column says an episode is tight. It cannot say whether tight sounds bad — a
+line 0.9s over its window might collide audibly with the next speaker or land
+in a pause nobody notices, and no number knows which.
+
+```bash
+python3 scripts/dub_clips.py "Shirokuma Cafe" --worst 3 --tightest 2 --clean 1
+```
+
+Cuts those exact lines out of the finished episodes into `dub/clips/`, worst
+first, a few seconds either side — more after than before, because what a long
+line does is land on the next speaker and the collision is the thing to listen
+for. `--tightest` gets the lines squeezed hardest, which is the other failure
+and sounds nothing like the first. `--clean` gets lines the render had no
+trouble with: a fault is only audible next to something that is not one.
+
+Episodes rendered before the timing report recorded placement cannot be cut,
+and the tool names them rather than skipping quietly — an episode missing from
+a worst-lines list otherwise reads as an episode with nothing wrong in it.
+
+### Watching a long run without reading it
+
+```bash
+tail -f -n0 dub/work/season.log | python3 scripts/dub_watch_log.py
+```
+
+Silent through a normal episode. It speaks for one that is genuinely tight, for
+a character marked `<- drifted`, for an unresolved overdub case, for
+adaptations that no longer match their line, and for a failure or a pause.
+
+Announcing every episode trains whoever is reading to skim, which is the state
+you least want them in on the render that actually went wrong.
+
 ### Sending one to somebody
 
 A dub in the library is Matroska carrying the dub, the original audio and both
@@ -832,6 +885,26 @@ line it tracked whatever the model happened to produce, so one character
 alternated between robotic and smooth from line to line: measured over a dull,
 a normal and a bright rendering of the same voice, the old behaviour varied by
 13.3 dB and the character reference holds all three at the same level.
+
+### The outlier that should stay an outlier
+
+`pace` is the tempting one, and the case against reaching for it is on record.
+Measured across a season, Polar Bear generates at 9.2 characters a second
+against a cast average of 12.3 — 25% slower than everyone, the largest outlier
+by a wide margin, and the worst overrunner in nearly every episode. Everything
+in the numbers says nudge him.
+
+He was left at 1.00. Rendered at 1.08, 1.12 and 1.18 and listened to against
+the original, the nudged versions sounded wrong: the character speaks slowly,
+that is who he is, and the metric was measuring the performance rather than a
+fault in it. The right reading of a 25% outlier is that the show has a slow
+character in it.
+
+Two things follow. Measure to find where to listen, never to decide what you
+heard — a table can say which line is worth your attention and cannot say
+whether it is bad. And expect a slow character to dominate the overrun list
+without that being a problem to solve, because his lines genuinely take longer
+than a subtitle window that was timed for reading.
 
 ## When the mix sounds wrong but not obviously wrong
 

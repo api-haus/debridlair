@@ -209,6 +209,37 @@ def report(plan, found, path=None):
         print("running this tool again clears it")
 
 
+def quality(plan, found):
+    """How well each finished episode fits its own timing.
+
+    Read off the timing report each render writes beside its episode, so this
+    costs nothing and cannot disagree with what was actually produced.
+
+    The number to watch is the share of lines that had to be compressed, not
+    the count of lines: measured across a season it tracks the overruns far
+    better than length does. An episode is not tight because it is long, it is
+    tight because its dialogue is dense, and compression share says so
+    directly. A high one is the episode to send back through dub_adapt.py.
+    """
+    print(f"{'ep':<7}{'lines':>6}{'squeezed':>10}{'over':>6}{'worst':>7}{'rate':>7}")
+    for entry in found:
+        report = Path(str(entry["output"]) + ".timing.json")
+        if not report.exists():
+            continue
+        rows = json.loads(report.read_text())
+        squeezed = sum(1 for row in rows if row["compression"] > 1.01)
+        # A line with no window at all — a title card at 0:00 is the usual one
+        # — counts its whole length as overflow, because there was never any
+        # room for it to fit inside. That is a fact about the card, not about
+        # the read, and left in it reported the worst overrun in an episode as
+        # twice what any character actually ran over by.
+        over = [row["overflow"] for row in rows
+                if row["overflow"] > 0.25 and row["available"] > 0]
+        print(f"S{plan['season']:02d}E{entry['number']:02d}{len(rows):>6}"
+              f"{squeezed / len(rows) * 100:>9.0f}%{len(over):>6}"
+              f"{max(over, default=0):>7.2f}{len(over) / len(rows) * 100:>6.1f}%")
+
+
 def halt(plan, why):
     brake = plan["work"] / PAUSE
     brake.write_text(f"{why} at {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
@@ -275,6 +306,9 @@ def main():
                              "which --status and --halt accept and a run does not")
     parser.add_argument("--status", action="store_true",
                         help="print where the season stands and stop")
+    parser.add_argument("--quality", action="store_true",
+                        help="print how well each finished episode fits its "
+                             "timing, in episode order")
     parser.add_argument("--halt", action="store_true",
                         help="set the pause file, stopping a run already going")
     parser.add_argument("--limit", type=int, metavar="N",
@@ -287,11 +321,15 @@ def main():
     if not paths:
         raise SystemExit("no season plans under dub/; see docs/dubbing.md")
 
-    if args.status:
+    if args.status or args.quality:
         for index, path in enumerate(paths):
             plan = read_plan(path)
             print() if index else None
-            report(plan, episodes(plan), path)
+            if args.quality:
+                print(f"{plan['show']}, season {plan['season']:02d}\n")
+                quality(plan, episodes(plan))
+            else:
+                report(plan, episodes(plan), path)
         return 0
 
     if args.halt:
