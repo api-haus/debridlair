@@ -205,8 +205,10 @@ def stop_asked(pause_file):
     return _stop_asked or (pause_file is not None and pause_file.exists())
 
 
-# Punctuation the tokenizer has no token for and that NFKD will not decompose,
-# because it is not an accented letter — nothing to strip. The em dash is
+# Punctuation the tokenizer has no token for. The horizontal bar and the minus
+# sign are the two that need naming: NFKC leaves both exactly as they are,
+# having nothing to decompose them to. The ellipsis and the no-break space NFKC
+# would fold on its own, and stay here for whoever reads the map. The em dash is
 # absent deliberately: the tokenizer already takes it as a hyphen.
 UNSPEAKABLE = {"―": "-", "−": "-", "…": "...", " ": " "}
 
@@ -214,35 +216,50 @@ UNSPEAKABLE = {"―": "-", "−": "-", "…": "...", " ": " "}
 def speakable(text, say_as):
     """The line as the model should receive it, which is not what a reader gets.
 
-    The tokenizer splits on what it has seen, and it has seen English. An
-    accented letter is not in any pair it knows, so it breaks off alone —
-    `café` arrives as CA, F, É — and the model, holding a character with no
-    English pronunciation, guesses. That is where "caf" and "cafu" come from,
-    and why the same word sometimes comes out right: it is a guess each time.
-    Folded to ASCII the word arrives as CA, FE, which the model has seen.
+    This used to fold every accent away before synthesis. On IndexTTS-2 that was
+    right: its tokenizer had seen English and nothing else, an accented letter
+    was in no pair it knew, so `café` arrived as CA, F, É and the model — handed
+    a character with no English sound — guessed, which is where "caf" and "cafu"
+    came from.
 
-    Folding is not always enough. English spelling does not determine English
-    pronunciation, so a word can tokenize cleanly and still be read wrong, and
-    for those there is a respelling — chosen by listening, because nothing
-    about the tokens predicts it.
+    2.5's tokenizer is multilingual and byte-level. It holds ` café` whole, as
+    one piece it has heard, and folding that to ` cafe` hands it a *different*
+    token to guess at. Measured over this show, folding wrecked far more than it
+    rescued — `caffè` became "calf latte", `à la mode` became "Allah mode" — so
+    the line now goes to the model as written, and the exceptions are named
+    rather than assumed.
+
+    An exception is a word the model reads wrong as written, which is a fact
+    about that word and only findable by listening: `dub_saytest.py` speaks the
+    candidates and `dub_sayhear.py` transcribes them. The answer goes in the
+    lexicon, either as a plain respelling or as an ARPABET annotation 2.5 is
+    trained to obey — `<göreme|G ER1 EH0 M EH0>`.
+
+    Compatibility forms are still normalised, which is a different thing from
+    folding accents and was worth keeping when the fold went: a fansub that
+    types a fullwidth hyphen or a halfwidth katakana means the ordinary
+    character, and NFKC says so. It leaves `é` as `é` — stripping that needs
+    NFKD and a pass over the combining marks, which is exactly what no longer
+    happens here.
 
     Only synthesis sees any of this. The subtitle track keeps the real word.
     """
-    text = "".join(UNSPEAKABLE.get(c, c) for c in text)
-    folded = "".join(c for c in unicodedata.normalize("NFKD", text)
-                     if not unicodedata.combining(c))
+    text = unicodedata.normalize("NFKC",
+                                 "".join(UNSPEAKABLE.get(c, c) for c in text))
     if not say_as:
-        return folded
+        return text
 
     def swap(match):
         word = match.group(0)
         spoken = say_as[word.lower()]
         # A respelling is lower case in the lexicon; a word that was capitalised
-        # in the line stays capitalised, so sentence case survives.
+        # in the line stays capitalised, so sentence case survives. An ARPABET
+        # annotation is unharmed by this — the model upper-cases the phones
+        # itself, and discards the word left of the bar entirely.
         return spoken.capitalize() if word[:1].isupper() else spoken
 
     return re.sub(r"\b(?:%s)\b" % "|".join(map(re.escape, say_as)),
-                  swap, folded, flags=re.IGNORECASE)
+                  swap, text, flags=re.IGNORECASE)
 
 
 def clip_stamp(text, references, fits, emo):
@@ -517,7 +534,7 @@ def room_for(utterance):
     return utterance["window"] + max(0.0, utterance["slack"] - SPEAKER_MARGIN)
 
 
-def synthesize(tts, utterances, bank, workdir, emo_from_text, attempts=RESYNTH_ATTEMPTS,
+def synthesize(speak, utterances, bank, workdir, emo_from_text, attempts=RESYNTH_ATTEMPTS,
                clips=None, pause_file=None, say_as=None):
     """Generate one wav per utterance, in that character's cloned voice.
 
@@ -570,7 +587,7 @@ def synthesize(tts, utterances, bank, workdir, emo_from_text, attempts=RESYNTH_A
 
         takes, retries = [], 0
         for name in speaking:
-            take = draw_line(tts, bank[name]["path"], spoken, fits,
+            take = draw_line(speak, bank[name]["path"], spoken, fits,
                              kwargs, attempts)
             if take is None:
                 continue
@@ -609,15 +626,15 @@ def synthesize(tts, utterances, bank, workdir, emo_from_text, attempts=RESYNTH_A
     return rendered
 
 
-def draw_line(tts, voice_path, text, fits, kwargs, attempts):
+def draw_line(speak, voice_path, text, fits, kwargs, attempts):
     """Generate one line, redrawing while it will not fit."""
     best, retries = None, 0
     for attempt in range(attempts):
         # Asking for no output path returns the audio instead of writing it.
         # Writing it here keeps the pipeline off torchaudio.save, which needs
         # TorchCodec on current torchaudio and fails without it.
-        result = tts.infer(spk_audio_prompt=voice_path, text=text,
-                           output_path=None, verbose=False, **kwargs)
+        result = speak(spk_audio_prompt=voice_path, text=text,
+                       output_path=None, verbose=False, **kwargs)
         if result is None:
             continue
         sample_rate, samples = result
@@ -1104,9 +1121,11 @@ def main():
     parser.add_argument("--to", dest="end", help="end timecode")
     parser.add_argument("--emo-from-text", action="store_true",
                         help="let the model read emotion out of the line")
-    parser.add_argument("--fp16", action="store_true", help="half precision inference")
-    parser.add_argument("--checkpoints", default="dub/checkpoints_2",
-                        help="IndexTTS-2 checkpoint directory")
+    parser.add_argument("--fp16", action="store_true",
+                        help="bf16 inference: lighter on the card, and it changes "
+                             "what the model produces, so not mid-season")
+    parser.add_argument("--checkpoints", default="dub/checkpoints_2_5",
+                        help="IndexTTS-2.5 checkpoint directory")
     parser.add_argument("--no-understudies", action="store_true",
                         help="leave characters with no clean audio in the original language")
     parser.add_argument("--compress", type=float, default=COMPRESS_RATIO, metavar="RATIO",
@@ -1323,15 +1342,27 @@ def main():
                                                key=lambda item: -item[1][1]):
                 print(f"    {role:<24}{pitch:>5} Hz  {shade:>+6.2f} st")
 
-    from indextts.infer_v2 import IndexTTS2
+    # IndexTTS-2.5. The 2 path is gone rather than kept behind a flag: a season
+    # cannot be split across the two anyway — the clone differs, so the whole
+    # cast changes voice mid-run — which makes the flag a way to ruin a season
+    # rather than a way to choose. Anything rendered on 2 is being rendered
+    # again, and git holds the old path if that ever stops being true.
     checkpoints = Path(args.checkpoints)
-    tts = IndexTTS2(cfg_path=str(checkpoints / "config.yaml"), model_dir=str(checkpoints),
-                    use_fp16=args.fp16)
+    from indextts.infer_v2_5 import IndexTTS2
+    tts = IndexTTS2(cfg_path=str(checkpoints / "config.yaml"),
+                    model_dir=str(checkpoints), use_bf16=args.fp16)
+
+    # 2.5 wants the language named rather than guessed, and every line here is
+    # English by construction: the dub is the translation.
+    def speak(**kwargs):
+        return tts.infer(lang="EN", **kwargs)
+
+    print(f"speaking with IndexTTS-2.5 from {checkpoints}")
 
     workdir = Path(tempfile.mkdtemp())
     print(f"speaking {len(utterances)} lines")
     try:
-        rendered = synthesize(tts, utterances, bank, workdir, args.emo_from_text,
+        rendered = synthesize(speak, utterances, bank, workdir, args.emo_from_text,
                               args.attempts, clips, pause_file, say_as)
     except Paused:
         held = len(list(clips.glob("*.wav"))) if clips else 0
@@ -1501,9 +1532,11 @@ def main():
     staged.replace(output)
     print(f"wrote {output}")
 
-    # Only now, with the episode finished on disk, are the clips spent. Keeping
-    # them would cost a few hundred megabytes an episode to hold a cache whose
-    # only job was to survive an interruption that did not happen.
+    # Only now, with the episode finished on disk, are the clips spent — for a
+    # preview. A season keeps them (`--keep-clips`, which dub_season passes),
+    # because they are also what makes repairing one line of a finished episode
+    # cost that line rather than the quarter hour behind it. They run about
+    # 120 KB a line, so an episode is some 40 MB and a season a couple of GB.
     if clips and not args.keep_clips:
         shutil.rmtree(clips, ignore_errors=True)
 
