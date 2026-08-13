@@ -143,7 +143,10 @@ UI use Identify. Item GET by id is `/emby/Users/{uid}/Items/{id}`, not
 ## Keeping an airing show topped up
 
 `sync-state/watchlist.txt` lists shows to follow, one per line as
-`<library/tv folder> | <query template>`:
+`<library/tv folder> | <query template>`. It is gitignored, like `PREFS.md`
+and for the same reason — what somebody follows is theirs, not shared
+doctrine. `sync-state/watchlist.example.txt` is the tracked template; copy it
+if there is no watchlist yet.
 
 ```
 Chainsmoker Cat | Chainsmoker Cat S{season:02d}E{ep:02d}

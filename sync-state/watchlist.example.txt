@@ -1,0 +1,13 @@
+# Shows to follow, one per line, as:
+#
+#     <library/tv folder> | <query template>
+#
+# scripts/torbox_watch.py counts from the highest episode already in the
+# folder's newest season and queues only what comes after, so it never
+# re-queues. Prefer {season:02d} over a hard-coded season number — that is
+# what lets it catch a new season premiering as well as the next episode.
+#
+# Copy this to watchlist.txt, which is gitignored because what you follow is
+# yours. Blank lines and lines starting with # are ignored.
+
+Chainsmoker Cat | Chainsmoker Cat S{season:02d}E{ep:02d}
