@@ -19,8 +19,10 @@ rclone/
 
 # The dubbing workspace: a venv, several GB of model weights, downloaded
 # episodes, stems and generated audio. All of it is rebuildable from
-# scripts/dub_*.py, and none of it belongs in git.
-dub/
+# scripts/dub_*.py, and none of it belongs in git. Anchored, because unanchored
+# it excludes every directory named dub at any depth — .agents/skills/dub/
+# among them, which is the tracked source of a skill.
+/dub/
 
 __pycache__/
 *.pyc
