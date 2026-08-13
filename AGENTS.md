@@ -250,6 +250,27 @@ tidy up, because that is the resume point. Full detail in `docs/dubbing.md`.
   `docker compose up -d emby-throttle`; check with
   `tc -s qdisc show dev br-debrid`. Shaping the bridge rather than each veth
   is deliberate — per-veth caps give every container its own 40 Mbit.
+- **`processqueue gpu` is a VRAM budget, and a job must declare its share.**
+  One ticket is one GiB. A dub render holds about 10 GiB for a quarter of an
+  hour and so asks for 11, counting the CUDA context; the pool is 14 on this
+  16 GiB card, because context and fragmentation cost about 2 GiB beyond what
+  the models hold — an OOM was measured at 13.5 GiB used.
+
+  ```bash
+  processqueue gpu --info                 # wants: 14 tickets, default 3
+  processqueue gpu:11 <a render>          # declares 11 GiB
+  nvidia-smi --query-compute-apps=pid,used_memory --format=csv
+  ```
+
+  Declare a new kind of GPU job by measuring it with `nvidia-smi` while it
+  runs, not by guessing. A job that does not declare costs the queue's
+  default, which is deliberately small — undeclared work is assumed light,
+  and heavy undeclared work is what oversubscribes the card.
+
+  Two renders at once do not run slower, they fail: the second dies of CUDA
+  out-of-memory part way through a scene it has already half generated. This
+  queue is the only thing preventing that, so never bypass it, and never
+  raise the pool to make something start sooner.
 - **Prefer `docker compose stop` over `down`.** `down` removes the rclone
   container without unmounting, leaving a dead FUSE endpoint at `rclone/mnt`
   that makes the next `up` fail with `transport endpoint is not connected` —

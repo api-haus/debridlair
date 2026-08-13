@@ -72,7 +72,7 @@ EXIT_PAUSED = 75
 DEFAULTS = {"work": "dub/work", "voices": "dub/voices_test",
             "stems": "dub/stems/htdemucs", "source": "dub/source",
             "library": "dub/finished/tv", "python": "dub/.venv/bin/python",
-            "queue": "gpu", "season": 1, "options": [], "aliases": []}
+            "queue": "gpu:11", "season": 1, "options": [], "aliases": []}
 
 # Every path in a plan is written the way the docs write it, relative to the
 # repository, and resolved against the repository rather than against whatever

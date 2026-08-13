@@ -192,9 +192,12 @@ processqueue gpu dub/.venv/bin/python scripts/dub_render.py \
     --video dub/source/s01e01.mkv --from 20:38 --to 21:52 -o dub/preview/cafe.mkv
 ```
 
-Render through the `gpu` queue. Inference holds most of the card for the whole
-run, so two renders at once do not run slower, they fail: the second dies with
+Render through the `gpu` queue, declaring what it costs: `processqueue gpu:11`,
+one ticket per GiB of VRAM. Inference holds about 10 GiB for the length of the
+run, so two renders at once do not run slower, they fail — the second dies with
 a CUDA out-of-memory part way through a scene it has already half generated.
+Declaring the cost is what lets a smaller job run alongside instead of waiting
+out a quarter of an hour for a card that had room for it all along.
 
 The output keeps the Japanese track and adds the dub beside it, so nothing is
 replaced and Emby simply shows an extra audio track. The music and effects bed
