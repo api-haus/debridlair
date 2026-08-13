@@ -220,6 +220,12 @@ python3 scripts/dub_season.py "Shirokuma Cafe"          # run, or carry on
 python3 scripts/dub_season.py --halt                    # stop whatever is going
 ```
 
+To hand a finished dub to somebody, `scripts/dub_share.py <show> <episode>`
+writes an MP4 to `dub/share/` carrying the dub track only. Do not send a file
+out of `library/` or `dub/finished/` directly — those are Matroska with two
+audio tracks, which chat clients attach rather than play and which leave the
+recipient a coin toss over the language.
+
 Where it got to is measured off the disk, never recorded, so a session that
 knows nothing about an earlier one resumes correctly by running the same
 command. `--halt` writes `PAUSE` in the show's work directory, which any

@@ -305,6 +305,29 @@ Asked to stop while an episode is already mixing, the render finishes it. That
 part is CPU and minutes; the GPU is already idle, which is what the stop was
 for. It then exits without starting another.
 
+### Sending one to somebody
+
+A dub in the library is Matroska carrying the dub, the original audio and both
+subtitle tracks. That is right for Emby and wrong for handing to a person:
+chat clients play MP4 inline and send Matroska as a file attachment, and a
+second audio track is a coin toss over which language they hear.
+
+```bash
+python3 scripts/dub_share.py "Shirokuma Cafe" 1               # -> dub/share/
+python3 scripts/dub_share.py "Shirokuma Cafe" 1 --height 720  # smaller, slower
+```
+
+It keeps the dub and drops the rest, and it does **not** re-encode unless it
+has to. These renders come out H.264 High in yuv420p with AAC-LC beside them,
+which is already what a phone wants, so the video is copied and only the
+container changes — seconds rather than an hour of CPU, and lossless. Ask for
+a height and it transcodes instead, which is worth doing when the file has to
+be smaller rather than better.
+
+Subtitles are dropped: chat clients do not render them, and some refuse to
+play a file inline once it carries any. The index is moved to the front so it
+plays while it arrives rather than after.
+
 ## Giving overlapping dialogue a stereo position
 
 Rare, and worth its own pass rather than a fixed rule in `dub_render.py`: two
