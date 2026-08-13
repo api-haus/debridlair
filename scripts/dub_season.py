@@ -133,16 +133,25 @@ def resolve(wanted):
 
 
 def episodes(plan):
-    """Every episode the work directory holds a parsed script for.
+    """Every episode in the season, prepared or not.
 
-    Discovered rather than listed, so an episode prepared later joins the run
-    by existing and nobody has to extend a range by hand.
+    Parsed scripts are discovered rather than listed, so an episode prepared
+    later joins the run by existing and nobody extends a range by hand. But
+    discovery alone cannot see an episode that was never prepared, and a
+    season one episode in then reports as fully rendered — which is the one
+    thing a progress tool must never say. `episodes` in the plan is how many
+    the season actually has, and the ones with no parse are counted and shown
+    as missing rather than quietly left out of the total.
     """
     season = plan["season"]
+    numbers = {int(re.search(r"e(\d+)$", parsed.name.split(".")[0]).group(1))
+               for parsed in plan["work"].glob(f"s{season:02d}e*.utterances.json")}
+    numbers |= set(range(1, (plan.get("episodes") or 0) + 1))
+
     found = []
-    for parsed in sorted(plan["work"].glob(f"s{season:02d}e*.utterances.json")):
-        stem = parsed.name.split(".")[0]
-        number = int(re.search(r"e(\d+)$", stem).group(1))
+    for number in sorted(numbers):
+        stem = f"s{season:02d}e{number:02d}"
+        parsed = plan["work"] / f"{stem}.utterances.json"
         name = (f"S{season:02d}E{number:02d} - {plan['show']} - "
                 f"{number:02d} [Dub].mkv")
         found.append({
@@ -161,8 +170,9 @@ def progress(entry):
     """Where one episode stands, measured off the disk and nothing else."""
     if entry["output"].exists():
         return "done", 0, 0
-    lines = sum(1 for u in json.loads(entry["utterances"].read_text())
-                if u.get("kind") != "skip")
+    lines = (sum(1 for u in json.loads(entry["utterances"].read_text())
+                 if u.get("kind") != "skip")
+             if entry["utterances"].exists() else 0)
     drawn = len(list(entry["clips"].glob("*.wav"))) if entry["clips"].exists() else 0
     return ("part" if drawn else "waiting"), drawn, lines
 

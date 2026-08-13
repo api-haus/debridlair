@@ -231,6 +231,7 @@ It reads one plan file, and that file is the whole memory of the run:
 {
   "show": "Polar Bear Cafe",
   "aliases": ["Shirokuma Cafe", "panda"],
+  "episodes": 50,
   "season": 1,
   "work": "dub/work",
   "voices": "dub/voices_test",
@@ -270,6 +271,13 @@ disk every time: an episode is done because the episode is in the library, and
 a line is drawn because its clip is in `dub/work/clips/`. A progress note can
 be wrong; a file cannot. This is why a session that knows nothing about an
 earlier one can pick the season up correctly.
+
+**`episodes` is the one thing the disk cannot tell it.** Parsed scripts are
+discovered, so an episode prepared later joins the run by existing — but an
+episode never prepared leaves no trace to discover, and without a declared
+length a season one episode in reports as fully rendered. Set it to how many
+episodes the season has, and the ones with nothing prepared are counted in
+the total and listed as `NOT PREPARED` instead of being silently absent.
 
 **Stopping is a file.** `--halt` writes `dub/work/PAUSE`, and the render checks
 for it between lines. It is a file rather than a signal because the session
