@@ -11,19 +11,28 @@ Usage:
     python3 scripts/dub_survey.py --mkv EPISODE.mkv        # extracts English ASS first
 
 Read the verdict column. A title whose main cast reaches "usable" or better is
-worth dubbing. A title where every row is "fallback" has no speaker labels, so
-the dub needs speaker diarization and the result is poor. Pass several episodes
+worth dubbing as a cast, one cloned voice per character. Pass several episodes
 to pool reference audio across a season, which is how the supporting cast gets
 enough material.
+
+A title whose track names nobody cannot be dubbed that way at all, and this
+says so in as many words rather than printing an empty table. It is still
+dubbable as a solo read — one actor for the whole episode, the way an amateur
+dub has always been made — which is what `dub_script.py --solo` builds.
 """
 
 import argparse
 import collections
-import re
-import subprocess
 import sys
-import tempfile
 from pathlib import Path
+
+# The survey has to measure what the dub will actually speak, so it reads the
+# track through the same parser the dub does rather than a second copy of the
+# rules. A survey and a render that disagree about what counts as a line is a
+# survey that tells you about a different episode.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from dub_script import (attribute, extract_subtitles, read_events,  # noqa: E402
+                        readable_signs)
 
 # Zero-shot voice cloning needs a few seconds of reference audio. These
 # thresholds are total clean solo speech per character, in seconds.
@@ -32,103 +41,79 @@ STRONG, USABLE, THIN = 30.0, 10.0, 3.0
 # A reference clip shorter than this is too short to clone a timbre from.
 MIN_CLIP = 1.5
 
-# Fansub styles carry meaning: dialogue styles hold speech, everything else is
-# typeset signage (shop signs, menus, episode titles) that must never be dubbed.
-# Matched case-insensitively as a substring of the style name.
-DIALOGUE_STYLE_HINTS = ("main", "dialog", "default", "overlap", "internal",
-                        "flashback", "thought", "italics", "alt", "caption")
-
-
-def parse_time(stamp):
-    hours, minutes, seconds = stamp.split(":")
-    return int(hours) * 3600 + int(minutes) * 60 + float(seconds)
-
-
-def extract_ass(mkv_path):
-    """Pull the English ASS/SRT track out of a Matroska file to a temp file."""
-    probe = subprocess.run(
-        ["ffprobe", "-v", "error", "-select_streams", "s",
-         "-show_entries", "stream=index:stream_tags=language",
-         "-of", "csv=p=0", str(mkv_path)],
-        capture_output=True, text=True, check=True)
-
-    track = None
-    for row in probe.stdout.splitlines():
-        parts = row.split(",")
-        if len(parts) >= 2 and parts[1].strip().lower() in ("eng", "en"):
-            track = int(parts[0])
-            break
-    if track is None:
-        raise SystemExit(f"no English subtitle track in {mkv_path}")
-
-    out = Path(tempfile.mkdtemp()) / "eng.ass"
-    subprocess.run(["ffmpeg", "-v", "error", "-i", str(mkv_path),
-                    "-map", f"0:{track}", "-c", "copy", str(out), "-y"],
-                   check=True)
-    return out
-
-
-def is_dialogue_style(style):
-    lowered = style.lower()
-    return any(hint in lowered for hint in DIALOGUE_STYLE_HINTS)
-
-
-def read_lines(path):
-    """Return the speech events as (start, end, speaker, text, is_continuation).
-
-    Signage styles are dropped. An unlabelled dialogue line inherits the
-    previous speaker, because fansubbers split one utterance across two
-    subtitle events and label only the first.
-    """
-    events = []
-    previous_speaker = None
-
-    for raw in Path(path).read_text(encoding="utf-8-sig", errors="replace").splitlines():
-        if not raw.startswith("Dialogue:"):
-            continue
-        fields = raw[len("Dialogue:"):].split(",", 9)
-        if len(fields) < 10:
-            continue
-
-        start, end, style, name, text = (parse_time(fields[1]), parse_time(fields[2]),
-                                         fields[3].strip(), fields[4].strip(), fields[9])
-        text = re.sub(r"\{[^}]*\}", "", text).replace(r"\N", " ").strip()
-        if not text or not is_dialogue_style(style):
-            continue
-
-        continuation = not name
-        speaker = name or previous_speaker
-        if speaker is None:
-            continue
-        previous_speaker = speaker
-        events.append((start, end, speaker, text, continuation))
-
-    return events
-
 
 def survey(paths):
+    """Measure each named character, and everything the track left unnamed.
+
+    A track that names nobody puts every line in the unnamed bucket, which is
+    the whole finding: there is no cast to build, and the numbers that matter
+    then are how much clean speech there is to cut one reference from and how
+    much of the episode is two people at once.
+    """
     stats = collections.defaultdict(
         lambda: {"lines": 0, "speech": 0.0, "clean": 0, "clean_speech": 0.0})
-    total_lines = 0
+    unnamed = {"lines": 0, "speech": 0.0, "clean_speech": 0.0, "collisions": 0,
+               "signs": 0, "labelled_files": 0}
 
     for path in paths:
-        events = read_lines(path)
-        total_lines += len(events)
-        for index, event in enumerate(events):
-            start, end, speaker = event[0], event[1], event[2]
-            entry = stats[speaker]
-            entry["lines"] += 1
-            entry["speech"] += end - start
+        events = read_events(path)
+        speech, labelled = attribute(events)
+        unnamed["labelled_files"] += 1 if labelled else 0
+        unnamed["signs"] += len(readable_signs([e for e in events if e["kind"] == "sign"],
+                                               speech))
+
+        for index, event in enumerate(speech):
+            start, end, speaker = event["start"], event["end"], event["speaker"]
 
             # A clip is usable as a voice reference only when nobody else talks
             # over it, because an overlapping voice poisons the cloned timbre.
-            solo = not any(start < other[1] and other[0] < end and other[2] != speaker
-                           for position, other in enumerate(events) if position != index)
+            # On an unnamed track there is no way to know who the overlapping
+            # voice belongs to, so any overlap at all disqualifies the clip.
+            solo = not any(start < other["end"] and other["start"] < end
+                           and (speaker is None or other["speaker"] != speaker)
+                           for position, other in enumerate(speech) if position != index)
+
+            if speaker is None:
+                unnamed["lines"] += 1
+                unnamed["speech"] += end - start
+                unnamed["collisions"] += 0 if solo else 1
+                unnamed["clean_speech"] += (end - start) if solo and end - start >= MIN_CLIP else 0
+                continue
+
+            entry = stats[speaker]
+            entry["lines"] += 1
+            entry["speech"] += end - start
             if solo and end - start >= MIN_CLIP:
                 entry["clean"] += 1
                 entry["clean_speech"] += end - start
 
-    return stats, total_lines
+    return stats, unnamed
+
+
+def report_unnamed(unnamed, files):
+    """Say what a track that names nobody can still be made into.
+
+    An empty cast table is not the same finding as a thin one, and printing
+    nothing invites the reader to conclude the tool failed. What is true here
+    is narrower and more useful: no character can be cloned, and the episode
+    is still dubbable by one actor reading all of it.
+    """
+    if not unnamed["lines"]:
+        raise SystemExit("no dialogue found at all: this is not a subtitle track "
+                         "the dub can read")
+
+    print(f"no character is named on any line of {files} file(s) — "
+          f"there is no cast to clone\n")
+    print(f"  {unnamed['lines']:>5} dialogue lines")
+    print(f"  {unnamed['speech'] / 60:>5.1f} min of speech")
+    print(f"  {unnamed['collisions']:>5} lines overlap another and would be read in sequence")
+    print(f"  {unnamed['signs']:>5} signs fall in the clear and would be read out")
+    print(f"  {unnamed['clean_speech']:>5.0f}s of clean solo speech to cut one reference from"
+          f"   {verdict(unnamed['clean_speech'])}")
+
+    print(f"\nDub it as a solo read — one actor for the whole episode, the way an "
+          f"amateur dub\nhas always been made. See docs/dubbing.md:\n")
+    print(f"  python3 scripts/dub_script.py EPISODE.mkv -o utterances.json --solo")
 
 
 def verdict(clean_speech):
@@ -149,11 +134,12 @@ def main():
                         help="treat the sources as Matroska files and extract the English track")
     args = parser.parse_args()
 
-    paths = [extract_ass(source) for source in args.sources] if args.mkv else args.sources
-    stats, total_lines = survey(paths)
+    paths = [extract_subtitles(source) for source in args.sources] if args.mkv else args.sources
+    stats, unnamed = survey(paths)
 
     if not stats:
-        raise SystemExit("no labelled dialogue found: this title needs speaker diarization")
+        report_unnamed(unnamed, len(paths))
+        return 0
 
     print(f"{'CHARACTER':<18}{'lines':>6}{'speech':>9}{'clean':>7}{'usable':>9}  verdict")
     print("-" * 80)
@@ -162,9 +148,13 @@ def main():
               f"{entry['clean']:>7}{entry['clean_speech']:>8.0f}s  {verdict(entry['clean_speech'])}")
 
     cloneable = sum(1 for entry in stats.values() if entry["clean_speech"] >= USABLE)
+    total_lines = sum(entry["lines"] for entry in stats.values()) + unnamed["lines"]
     dubbed_speech = sum(entry["speech"] for entry in stats.values())
     print(f"\n{total_lines} dialogue lines, {dubbed_speech/60:.0f} min of speech, "
           f"{len(stats)} speakers, {cloneable} with enough audio to clone")
+    if unnamed["labelled_files"] < len(paths):
+        print(f"{len(paths) - unnamed['labelled_files']} of the surveyed files name "
+              f"nobody at all; their {unnamed['lines']} lines are not in the table above")
 
 
 if __name__ == "__main__":

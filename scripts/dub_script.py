@@ -4,8 +4,9 @@
 A subtitle track is written to be read, not spoken, so it cannot be fed to a
 voice model as it stands. This tool applies the corrections that a dub needs:
 
-  - Signage is dropped. Fansub styles distinguish speech from typeset graphics
-    (shop signs, menus, episode titles). Only dialogue styles survive.
+  - Every event is classified. A line is speech, typeset signage, or a vector
+    drawing that holds no words at all. A cast dub speaks only the speech; a
+    solo dub also reads the signs that fall in the clear.
   - Split utterances are rejoined. A fansubber breaks one spoken sentence over
     two subtitle events and labels only the first, so an unlabelled line
     inherits the previous speaker and merges into that utterance. One
@@ -14,9 +15,15 @@ voice model as it stands. This tool applies the corrections that a dub needs:
     no single cloned voice can produce, so the dub leaves those in the
     original language.
 
+`--solo` casts one voice actor to read the whole episode, which is what a
+track carrying no speaker labels can still be dubbed as. Every line goes to
+one bank entry; whoever the line belongs to is kept beside it as a role, and
+a role only ever colours the read.
+
 Usage:
     python3 scripts/dub_script.py EPISODE.mkv -o utterances.json
     python3 scripts/dub_script.py EPISODE.ass -o utterances.json --report
+    python3 scripts/dub_script.py EPISODE.mkv -o utterances.json --solo
 """
 
 import argparse
@@ -32,6 +39,45 @@ from pathlib import Path
 # as a substring of the style name.
 DIALOGUE_STYLE_HINTS = ("main", "dialog", "default", "overlap", "internal",
                         "flashback", "thought", "italics", "alt", "caption")
+
+# A style name does not always say. Plenty of releases call every style
+# "Default" and separate the signs by hand, and on those the placement is the
+# evidence: spoken dialogue is left where the player puts it, while a sign is
+# positioned on the picture, over the thing it translates. Only placement
+# counts. Alignment alone does not: a fansubber raises a line to the top of
+# the frame whenever two people talk at once, which is dialogue.
+TYPESET = re.compile(r"\\(?:pos|move|clip|iclip|org|frz|fry|frx)\b")
+
+# A drawing block holds vector commands rather than words. Read out, it says
+# its coordinates.
+DRAWING = re.compile(r"\\p[1-9]\b")
+
+# The subtitle codecs that carry words. A bitmap track (PGS, VobSub) holds
+# pictures of words, which nothing downstream can read.
+TEXT_SUBTITLE_CODECS = ("ass", "ssa", "subrip", "mov_text")
+
+# Lyrics are not signage and are never dubbed — a song stays as it was. They
+# have to be named separately because a karaoke style is neither a dialogue
+# style nor a sign, and a solo read that treats them as signage reads the
+# opening theme out over itself.
+SONG_STYLE = re.compile(r"kara|lyric|song|^insert\b|^(?:opening|ending)\b"
+                        r"|^(?:op|ed)(?:\b|[_ -])", re.IGNORECASE)
+
+# The one bank entry a solo dub speaks through. The character a line belongs
+# to is kept as its role, which colours the read and never picks the voice.
+SOLO_ACTOR = "NARRATOR"
+
+# Roles that name the reading rather than a character. They are the actor's
+# own register — the neutral the other roles are heard as departures from —
+# so they take no colour, and they are not expected to be spoken aloud by
+# anybody the way a character's name is.
+PLAIN_ROLES = {"NARRATION", "NARRATOR"}
+
+# A sign is only read when nothing is being said near it. A solo dubber reads
+# out a shop front over an establishing shot and would never talk across the
+# cast to do it, so a sign within this many seconds of speech is left on the
+# screen where it was.
+SIGN_CLEARANCE = 0.4
 
 # Speaker labels that name a crowd rather than a character. A cloned voice
 # cannot produce these, so they stay in the original audio.
@@ -67,22 +113,50 @@ def parse_time(stamp):
 
 
 def extract_subtitles(video_path):
-    """Pull the English subtitle track out of a Matroska file."""
+    """Pull the English subtitle track out of a Matroska file to a temp file.
+
+    Some fansub releases never set a language tag on their sole subtitle
+    track. Falling back to an untagged text track only when no track claims
+    "eng"/"en" keeps an explicit tag authoritative where one exists, while
+    still reading the (common) releases that skip the tag entirely.
+    """
     probe = subprocess.run(
         ["ffprobe", "-v", "error", "-select_streams", "s",
-         "-show_entries", "stream=index:stream_tags=language",
-         "-of", "csv=p=0", str(video_path)],
+         "-show_entries", "stream=index,codec_name:stream_tags=language,title",
+         "-of", "json", str(video_path)],
         capture_output=True, text=True, check=True)
+    streams = json.loads(probe.stdout).get("streams", [])
+    text_streams = [s for s in streams if s.get("codec_name") in TEXT_SUBTITLE_CODECS]
 
-    for row in probe.stdout.splitlines():
-        parts = row.split(",")
-        if len(parts) >= 2 and parts[1].strip().lower() in ("eng", "en"):
-            destination = Path(tempfile.mkdtemp()) / "eng.ass"
-            subprocess.run(["ffmpeg", "-v", "error", "-i", str(video_path),
-                            "-map", f"0:{parts[0]}", "-c", "copy",
-                            str(destination), "-y"], check=True)
-            return destination
-    raise SystemExit(f"no English subtitle track in {video_path}")
+    track = next((s["index"] for s in text_streams
+                  if s.get("tags", {}).get("language", "").lower() in ("eng", "en")), None)
+
+    if track is None:
+        untagged = [s for s in text_streams
+                    if s.get("tags", {}).get("language", "und").lower() == "und"]
+        if len(untagged) == 1:
+            track = untagged[0]["index"]
+        elif untagged:
+            # A release shipping several untagged tracks is usually shipping
+            # one with karaoke typesetting and one without. The dub wants the
+            # one without: the other reads the opening theme out over itself.
+            preferred = next((s for s in untagged
+                              if "without karaoke" in s.get("tags", {}).get("title", "").lower()),
+                             untagged[-1])
+            track = preferred["index"]
+            print(f"note: {video_path} tags no subtitle track as English; "
+                  f"{len(untagged)} untagged text tracks found, reading stream "
+                  f"{track} ({preferred.get('tags', {}).get('title', 'untitled')})",
+                  file=sys.stderr)
+
+    if track is None:
+        raise SystemExit(f"no English subtitle track in {video_path}")
+
+    destination = Path(tempfile.mkdtemp()) / "eng.ass"
+    subprocess.run(["ffmpeg", "-v", "error", "-i", str(video_path),
+                    "-map", f"0:{track}", "-c", "copy", str(destination), "-y"],
+                   check=True)
+    return destination
 
 
 def is_dialogue_style(style):
@@ -90,6 +164,8 @@ def is_dialogue_style(style):
 
 
 def is_group(speaker):
+    if not speaker:
+        return False          # a track that named nobody named no crowd either
     lowered = speaker.lower().strip()
     return lowered in GROUP_LABELS or "/" in lowered or "&" in lowered
 
@@ -123,10 +199,34 @@ def clean_text(raw):
     return re.sub(r"\s+", " ", text).strip()
 
 
+def classify(raw, style):
+    """What an event is: speech, typeset signage, or not words at all.
+
+    The style name is asked first, because a fansub that separates its styles
+    has said outright which ones hold speech. Where every style is called
+    "Default" the override tags still tell them apart, since a sign has to be
+    drawn where the sign is.
+    """
+    overrides = " ".join(re.findall(r"\{([^}]*)\}", raw))
+    if DRAWING.search(overrides):
+        return "drawing"
+    if SONG_STYLE.search(style):
+        return "song"
+    if TYPESET.search(overrides) or not is_dialogue_style(style):
+        return "sign"
+    return "speech"
+
+
 def read_events(subtitle_path):
-    """Read dialogue events, resolving unlabelled lines to their speaker."""
+    """Read the events, classified, with each speech line's actor field.
+
+    Resolving an unlabelled line to the previous speaker is left to the
+    caller, because it is only sound where the track labels anything at all.
+    On a track that labels nothing, an empty actor field is the fansubber
+    saying nothing rather than saying "the same character continues", and
+    reading it as continuation merges a whole scene into one breath.
+    """
     events = []
-    previous_speaker = None
 
     for raw in Path(subtitle_path).read_text(encoding="utf-8-sig",
                                              errors="replace").splitlines():
@@ -144,20 +244,37 @@ def read_events(subtitle_path):
         # how one character ends up cloned from a sliver of their lines under
         # one spelling while the rest of their appearances sit under another.
         style, name = fields[3].strip(), fields[4].strip().upper()
+        kind = classify(fields[9], style)
         text = clean_text(fields[9])
-        if not text or not is_dialogue_style(style):
+        if not text or kind in ("drawing", "song"):
             continue
 
-        speaker = name or previous_speaker
-        if speaker is None:
-            continue          # an unlabelled line before any labelled one
-        previous_speaker = speaker
-
         events.append({"start": parse_time(fields[1]), "end": parse_time(fields[2]),
-                       "speaker": speaker, "text": text, "style": style,
-                       "continuation": not name})
+                       "name": name, "kind": kind, "text": text, "style": style})
 
     return sorted(events, key=lambda event: event["start"])
+
+
+def attribute(events):
+    """Give each speech event a speaker, or say the track never named one.
+
+    An empty actor field between two labelled ones is an explicit
+    continuation and inherits. A track with no labelled line anywhere has no
+    speaker to inherit from, and this says so rather than inventing one.
+    """
+    speech = [event for event in events if event["kind"] == "speech"]
+    labelled = any(event["name"] for event in speech)
+
+    attributed, previous_speaker = [], None
+    for event in speech:
+        speaker = event["name"] or (previous_speaker if labelled else None)
+        if labelled and speaker is None:
+            continue          # an unlabelled line before any labelled one
+        previous_speaker = speaker
+        attributed.append({**event, "speaker": speaker,
+                           "continuation": labelled and not event["name"]})
+
+    return attributed, labelled
 
 
 def joins_sentence(earlier, later):
@@ -216,8 +333,19 @@ def merge_utterances(events):
         else:
             utterances.append({"start": event["start"], "end": event["end"],
                                "speaker": event["speaker"], "text": event["text"],
-                               "style": event["style"], "events": 1,
-                               "inferred": 0})
+                               "style": event["style"], "kind": event["kind"],
+                               "events": 1, "inferred": 0})
+
+    return utterances
+
+
+def annotate(utterances):
+    """Number the finished list and measure the room each line has.
+
+    Runs over whatever is actually going to be spoken, signs included, so the
+    room a line has accounts for everything that will be laid beside it.
+    """
+    utterances.sort(key=lambda utterance: utterance["start"])
 
     for index, utterance in enumerate(utterances):
         utterance["id"] = index
@@ -233,6 +361,47 @@ def merge_utterances(events):
         utterance["window"] = round(utterance["end"] - utterance["start"], 3)
 
     return utterances
+
+
+def cast_solo(utterances):
+    """Hand every line to one actor, keeping whoever said it as a role.
+
+    This is the whole of what makes a solo dub safe to build on a track
+    nobody labelled. The voice never depends on the attribution: one bank
+    entry speaks the episode, and the role is a shade on the read. Get the
+    role wrong and a line is coloured slightly differently; get a speaker
+    wrong in a cast dub and a character is talking in somebody else's voice.
+    """
+    for utterance in utterances:
+        utterance["role"] = utterance["speaker"] or None
+        utterance["speaker"] = SOLO_ACTOR
+    return utterances
+
+
+def readable_signs(signs, speech):
+    """The signs a solo dub can read without talking over the cast.
+
+    Reading out what is written on the screen is part of the register: a shop
+    front over an establishing shot, a letter held up to camera. It is only
+    available where nobody is speaking, which is also where a sign is usually
+    the only thing on screen worth saying.
+    """
+    readable = []
+    for sign in signs:
+        if any(sign["start"] - SIGN_CLEARANCE < line["end"]
+               and line["start"] < sign["end"] + SIGN_CLEARANCE
+               for line in speech):
+            continue
+        # A typesetter redraws one sign as several events to move it with the
+        # shot. Read once each time it comes up, not once per event.
+        if any(kept["text"] == sign["text"] and sign["start"] - kept["end"] < 15.0
+               for kept in readable):
+            continue
+        readable.append({"start": sign["start"], "end": sign["end"],
+                         "speaker": SOLO_ACTOR, "role": None, "text": sign["text"],
+                         "style": sign["style"], "kind": "sign",
+                         "events": 1, "inferred": 0})
+    return readable
 
 
 def find_overdubs(utterances):
@@ -330,13 +499,33 @@ def main():
     parser.add_argument("--overdubs", action="store_true",
                         help="print every case where separate characters' lines "
                              "collide in time, for scripts/dub_overdub.py")
+    parser.add_argument("--solo", action="store_true",
+                        help="cast one voice actor to read the whole episode, "
+                             "keeping whoever said each line as a role")
+    parser.add_argument("--no-signs", action="store_true",
+                        help="do not read out typeset signage in a solo dub")
     args = parser.parse_args()
 
     source = Path(args.source)
     subtitle_path = extract_subtitles(source) if source.suffix.lower() in (".mkv", ".mp4") else source
 
     events = read_events(subtitle_path)
-    utterances = merge_utterances(events)
+    speech, labelled = attribute(events)
+    if not labelled and not args.solo:
+        raise SystemExit(
+            f"{subtitle_path} names a speaker on no line at all, so there is "
+            f"nothing to cast a voice bank from. Either find a release whose "
+            f"fansub fills the actor field (scripts/dub_survey.py surveys one "
+            f"without downloading it), or dub this one with --solo: one voice "
+            f"actor reading the whole episode.")
+
+    utterances = merge_utterances(speech)
+    if args.solo:
+        cast_solo(utterances)
+        if not args.no_signs:
+            utterances += readable_signs([e for e in events if e["kind"] == "sign"],
+                                         speech)
+    annotate(utterances)
 
     overdubs = find_overdubs(utterances)
     for utterance in utterances:
@@ -347,12 +536,22 @@ def main():
     if args.report:
         merged = sum(1 for utterance in utterances if utterance["events"] > 1)
         groups = sum(1 for utterance in utterances if utterance["group"])
-        speech = sum(utterance["window"] for utterance in utterances)
+        on_screen = sum(utterance["window"] for utterance in utterances)
         print(f"{len(events)} subtitle events -> {len(utterances)} utterances "
               f"({merged} rejoined from splits)")
-        print(f"{groups} group lines left in the original language")
-        print(f"{speech/60:.1f} min of speech across "
-              f"{len({utterance['speaker'] for utterance in utterances})} speakers")
+        if args.solo:
+            read = sum(1 for utterance in utterances if utterance["kind"] == "sign")
+            roles = {utterance["role"] for utterance in utterances if utterance["role"]}
+            print(f"read by {SOLO_ACTOR} alone, including {read} signs that fall "
+                  f"in the clear")
+            print(f"{len(roles)} roles to colour the read with"
+                  if roles else
+                  "no roles: every line reads in the actor's own register "
+                  "until scripts/dub_label.py fills them in")
+        else:
+            print(f"{groups} group lines left in the original language")
+            print(f"{on_screen/60:.1f} min of speech across "
+                  f"{len({utterance['speaker'] for utterance in utterances})} speakers")
         print(f"\nwrote {args.output}")
 
     if args.audit:

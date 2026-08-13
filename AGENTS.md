@@ -188,11 +188,26 @@ subtitles, so it needs a fansub that labels each line with its character:
 python3 scripts/dub_survey.py --mkv EPISODE.mkv
 ```
 
-A main cast reading `usable clone` or better is worth dubbing. All rows reading
-`fallback voice` means there are no speaker labels, and the result would be one
-voice for everyone; say so rather than dubbing it.
+A main cast reading `usable clone` or better gets the full dub, one cloned
+voice per character.
 
-Dubbing never writes to `library/`. It works on local copies under `dub/`.
+A track that names nobody cannot be cast, and the survey says so instead of
+printing an empty table. That is not a reject: it gets a solo read — one actor
+for the whole episode, the amateur-dub form — through `--solo` on the same
+tools. Offer that rather than declining, and do not reach for diarization.
+`docs/dubbing.md` has both paths.
+
+Where a labelled fansub exists for a *different* release, `scripts/dub_align.py`
+fits the timing offset between the two before anything else runs. A subtitle
+track that is a second out dubs the whole episode over the wrong shots and
+every later stage accepts it happily.
+
+Dubbing never writes to `library/`. It works on local copies under `dub/`, one
+show per working directory (`--work dub/<show>`) — episodes are named by
+season and episode number, so two shows in one directory overwrite each other.
+Finished episodes belong in `dub/finished/tv/<Show>/Season NN/`, which Emby
+serves as its own "TV Shows (Dub)" library; a render left anywhere else under
+`dub/` is not in any library.
 
 ## Hard rules
 

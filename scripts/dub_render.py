@@ -21,6 +21,7 @@ Usage:
 """
 
 import argparse
+import hashlib
 import json
 import subprocess
 import sys
@@ -29,6 +30,10 @@ from pathlib import Path
 
 import numpy as np
 import soundfile as sf
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from dub_align import shift_file  # noqa: E402
+from dub_script import PLAIN_ROLES, SOLO_ACTOR, extract_subtitles  # noqa: E402
 
 # Compression beyond this is audible as a gabble, so a line that still does not
 # fit is left to overlap the next one instead.
@@ -103,6 +108,63 @@ LEAK_BAND = (300.0, 3400.0)
 # is to hear the performance quietly, not to remove it twice.
 LEAK_CENTRE = 0.3
 
+# How far a solo actor moves to suggest a different character: a semitone or
+# two, a few percent of pace, a little level. Small on purpose. The conceit is
+# one person doing all the voices, and a wide swing stops reading as that
+# person acting and starts reading as a second actor badly spliced in.
+SHADE_PITCH, SHADE_PACE, SHADE_GAIN = 1.6, 0.06, 0.10
+
+# Pitch is tracked once across the whole episode, at this rate and hop, and
+# every line then reads its own span out of the result. Downsampled because
+# nothing above 500 Hz is being looked for and the tracker costs what it is
+# given.
+PITCH_RATE, PITCH_FRAME, PITCH_HOP = 16000, 1024, 256
+
+# A line with fewer voiced frames than this has not been measured, it has been
+# guessed at. Roughly a third of a second of actual voice.
+MIN_VOICED = 20
+
+# How many semitones of real difference it takes to reach most of the lean,
+# through a curve rather than a straight line. A man and a woman are fifteen
+# semitones apart, so anything proportional puts every line of both at the
+# clamp and the shade becomes a two-position switch — measured that way, 248
+# of 329 lines sat on a rail. A curve keeps small differences small and lets
+# large ones approach the limit without every one of them arriving there.
+SHADE_SCALE = 8.0
+
+# Shades snap to this many semitones. Two lines of one character measured a
+# hair apart should land on the same shade, or the read wanders inside a scene
+# in a way no person does.
+SHADE_STEP = 0.25
+
+# How wide a band of pitch counts as one voice when looking for the register
+# the episode mostly sits in, in semitones either side.
+NEUTRAL_BAND = 2.0
+
+# A sign is read rather than performed: the actor is telling you what it says,
+# a touch flatter, a touch quicker and out of the way.
+SIGN_SHADE = {"pitch": -0.3, "pace": 1.05, "gain": 0.9}
+
+# How far the original mix comes down while the voice-over is speaking. The
+# broadcast figure, and it is a duck rather than a replacement: the original
+# performance stays there through the whole line, which is the whole texture
+# of a one-voice dub.
+DUCK_DB = 11.0
+
+# A voice-over comes in behind the line it is translating, never on top of its
+# first syllable. Small enough to read as the same beat, large enough that both
+# onsets are audible.
+VOICEOVER_LAG = 0.2
+
+# Breath between two lines one person reads back to back.
+SOLO_GAP = 0.12
+
+# How late a queued line may start before being allowed to overlap instead.
+# Past this it is answering a shot that has already gone, and a moment of two
+# voices is the smaller error.
+MAX_LAG = 2.5
+
+
 
 def parse_timecode(value):
     if value is None:
@@ -111,21 +173,26 @@ def parse_timecode(value):
     return sum(float(part) * 60 ** index for index, part in enumerate(reversed(parts)))
 
 
-def fit_to_slot(clip_path, generated, available, rate, semitones=0.0):
+def fit_to_slot(clip_path, generated, available, rate, semitones=0.0, pace=1.0):
     """Compress a generated line only as far as it stays natural.
 
     The returned audio is always at `rate`, whether or not it was compressed.
     Resampling has to happen in exactly one place: when the caller resampled a
     second time on the compression path, every compressed line played an octave
     low and at twice the length, running over the next speaker.
+
+    `pace` is a deliberate change of speed on top of the fitting, which is how
+    a solo actor colours one character against another. It rides on the same
+    tempo control rather than a second pass, because two rubberband passes over
+    one line smear it twice.
     """
     factor = 1.0
     if available > 0.2 and generated > available:
         factor = min(generated / available, MAX_COMPRESSION)
 
     settings = []
-    if factor > 1.0:
-        settings.append(f"tempo={factor:.4f}")
+    if abs(factor * pace - 1.0) > 0.001:
+        settings.append(f"tempo={factor * pace:.4f}")
     if semitones:
         settings.append(f"pitch={2 ** (semitones / 12.0):.5f}")
 
@@ -178,6 +245,163 @@ def resolve_members(members, bank):
     return resolved
 
 
+def shade_for(role):
+    """A small, repeatable colour for one role, taken from its name.
+
+    Nothing here knows anything about the character, so this only has two
+    jobs: keep two roles from coming out identical, and keep one role sounding
+    the same in episode nine as in episode one. A hash of the name does both
+    for free.
+
+    It is the floor rather than the answer. Pitch is measured off the original
+    performance wherever that is possible — see `measured_shades` — because
+    the one thing a hash cannot get right is which way to move.
+    """
+    digest = hashlib.sha1(role.encode("utf-8")).digest()
+    spread = [(byte / 127.5) - 1.0 for byte in digest[:3]]
+    return {"pitch": round(spread[0] * SHADE_PITCH, 2),
+            "pace": round(1.0 + spread[1] * SHADE_PACE, 3),
+            "gain": round(1.0 + spread[2] * SHADE_GAIN, 3)}
+
+
+def track_pitch(voices, rate):
+    """Voiced pitch across the whole episode, measured once.
+
+    Once rather than per line, because the tracker's cost is in the audio it
+    is handed and the lines are most of the episode anyway. Every line then
+    reads its own span out of the result.
+    """
+    import librosa
+
+    mono = voices.mean(axis=1)
+    if rate != PITCH_RATE:
+        mono = librosa.resample(mono, orig_sr=rate, target_sr=PITCH_RATE)
+
+    # pyin rather than yin, for the voicing decision rather than the pitch.
+    # yin answers for every frame including the ones holding no voice at all,
+    # and a separated stem is full of those: gated on energy alone it called
+    # 66% of the episode voiced and put the neutral 28 Hz above where the cast
+    # actually speak, because it was averaging in the pitch of leaked music.
+    f0, voiced, _ = librosa.pyin(mono, fmin=60, fmax=500, sr=PITCH_RATE,
+                                 frame_length=PITCH_FRAME, hop_length=PITCH_HOP)
+    return f0, voiced & np.isfinite(f0), PITCH_HOP / PITCH_RATE
+
+
+def dominant_pitch(spoken):
+    """The register the episode mostly sits in, from its measured lines.
+
+    The biggest cluster, not the middle of the spread. A show puts many short
+    lines from many mouths around one voice that holds the floor, and the
+    middle of that spread is a pitch nobody actually speaks at: measured that
+    way, a narrated show came out with its narrator 32 Hz *below* neutral, so
+    every line of his read pitched down. The densest band, weighted by how
+    long each line is, lands on the voice the show sounds like — which is also
+    the voice the reference was cut from, so a solo read's own lines come out
+    unshaded, which is the point of a neutral.
+    """
+    keys = np.log2(np.asarray([pitch for pitch, _ in spoken])) * 12.0
+    weight = np.asarray([window for _, window in spoken])
+    held = [float(weight[np.abs(keys - key) <= NEUTRAL_BAND].sum()) for key in keys]
+    return float(2 ** (keys[int(np.argmax(held))] / 12.0))
+
+
+def line_shades(utterances, f0, voiced, hop):
+    """How far each line's own original performance sits from the show's own
+    neutral, in semitones the actor should lean by.
+
+    This is the whole of the shading, and it needs no idea who is speaking.
+    The original track already says what pitch the character is at in this
+    exact moment, so the read leans that way — up for the girl, down for the
+    big man — without anything having to name them first. Where a labelling
+    does exist it only steadies the result: a line too short or too buried to
+    measure borrows its role's median rather than falling flat.
+
+    Measured against the episode's own median voiced pitch rather than
+    against the actor, so a shade is a property of the show and travels
+    between actors. Against the actor it would be systematically wrong the
+    moment they were cast from somewhere else: a woman reading a show narrated
+    by a man would find every ordinary line pulling her down toward him.
+
+    Stabilised three ways, because a raw per-line measurement wanders. It is
+    shrunk, so the actor suggests the difference instead of chasing it; it is
+    snapped to a step, so two lines of one character measured a hair apart
+    land on the same shade; and it is clamped, so nothing becomes an
+    impression however far apart the two voices really are.
+    """
+    heard, measured, spoken = {}, {}, []
+    for utterance in utterances:
+        # A sign is words on the picture. Whatever is voiced under it is not
+        # saying them, so its span measures somebody else entirely.
+        if utterance.get("kind") == "sign":
+            continue
+        head, tail = int(utterance["start"] / hop), int(utterance["end"] / hop)
+        window = f0[head:tail][voiced[head:tail]]
+        window = window[np.isfinite(window) & (window > 0)]
+        if window.size >= MIN_VOICED:
+            measured[utterance["id"]] = float(np.median(window))
+            spoken.append((measured[utterance["id"]], utterance["window"]))
+            if utterance.get("role"):
+                heard.setdefault(utterance["role"], []).append(measured[utterance["id"]])
+
+    if not measured:
+        return {}, {}, 0.0
+
+    neutral = dominant_pitch(spoken)
+    roles = {role: float(np.median(pitches)) for role, pitches in heard.items()
+             if len(pitches) >= 2}
+
+    def shade(pitch):
+        apart = 12.0 * np.log2(pitch / neutral)
+        leaned = SHADE_PITCH * np.tanh(apart / SHADE_SCALE)
+        stepped = round(leaned / SHADE_STEP) * SHADE_STEP
+        return round(float(np.clip(stepped, -SHADE_PITCH, SHADE_PITCH)), 2)
+
+    lifts = {}
+    for utterance in utterances:
+        pitch = measured.get(utterance["id"]) or roles.get(utterance.get("role"))
+        if pitch:
+            lifts[utterance["id"]] = shade(pitch)
+
+    return lifts, {role: (shade(pitch), round(pitch)) for role, pitch in roles.items()}, neutral
+
+
+def nudges_for(utterance, tuning, shades, lifts=None):
+    """Compose what the actor asks for with what this line asks for.
+
+    The tuning entry is the actor's own setting and applies to everything they
+    say. The shade goes on top: pitch adds, pace and gain multiply, so a shade
+    moves the actor from wherever they were rather than overwriting a tuning
+    arrived at by ear.
+
+    Pitch comes from `lifts` — this line's own measured distance from the
+    actor's register — whenever the line could be measured. A role's hashed
+    shade supplies pace and gain, and supplies pitch only where nothing was
+    measurable, which is the case a name is the last thing left to go on.
+    """
+    base = dict(tuning.get(utterance["speaker"], {}))
+    role, lift = utterance.get("role"), (lifts or {}).get(utterance.get("id"))
+
+    if utterance.get("kind") == "sign":
+        shade = SIGN_SHADE
+    elif role and role not in PLAIN_ROLES:
+        shade = shades.get(role, shade_for(role))
+    elif lift is not None:
+        # No label, and none needed: the original performance in this span is
+        # the only thing the shade was ever really about.
+        shade = {}
+    else:
+        # Narration is not a character the actor is doing, it is the actor.
+        # Colouring it would leave the episode with no neutral to hear the
+        # coloured lines against, which is what makes a shade read as a shade.
+        return base
+
+    pitch = lift if lift is not None else shade.get("pitch", 0.0)
+    return {**base,
+            "pitch": base.get("pitch", 0.0) + pitch,
+            "pace": base.get("pace", 1.0) * shade.get("pace", 1.0),
+            "gain": base.get("gain", 1.0) * shade.get("gain", 1.0)}
+
+
 def pan_gains(pan):
     """Equal-power left/right gain for a resolved overdub position.
 
@@ -209,6 +433,11 @@ def synthesize(tts, utterances, bank, workdir, emo_from_text, attempts=RESYNTH_A
     """
     rendered = []
     for utterance in utterances:
+        # A line somebody has marked as not to be spoken. The parser cannot
+        # tell a translator's note from an aside, so this is where a reading
+        # of the episode gets to say so.
+        if utterance.get("kind") == "skip":
+            continue
         speaking = ([utterance["speaker"]] if not utterance["group"]
                     else resolve_members(utterance.get("members", []), bank))
         if not speaking or any(name not in bank for name in speaking):
@@ -437,7 +666,8 @@ def duck_centre(original, rate):
     return np.stack([ducked + side, ducked - side], axis=1).astype("float32")
 
 
-def build_track(rendered, bed, voices, rate, air, tuning, overdubs=None):
+def build_track(rendered, bed, voices, rate, air, tuning, overdubs=None,
+                shades=None, sequential=False, lag=0.0, lifts=None):
     """Lay each spoken line onto a silent track at its scene position.
 
     The bed stays stereo because it carries the score and the sound design,
@@ -445,26 +675,47 @@ def build_track(rendered, bed, voices, rate, air, tuning, overdubs=None):
     image of the original mix. The generated speech is mono and almost always
     goes to the centre, which is where screen dialogue belongs — except for a
     line inside a resolved overdub case, which `overdubs` places instead.
+
+    `sequential` queues the lines instead of placing each at its own start.
+    One actor cannot talk over themselves: two of their lines summed on top of
+    each other are not two voices, they are one voice made unintelligible. So
+    a solo read waits its turn, and catches up by speaking the queued line
+    into whatever room is left rather than by staying behind.
     """
     dub = np.zeros((bed.shape[0], 2), dtype="float32")
     report, geometry, lines = [], [], []
-    overdubs = overdubs or {}
+    overdubs, shades = overdubs or {}, shades or {}
+    cursor = 0
 
     for utterance, clip_path in rendered:
         probe = sf.info(str(clip_path))
         generated = probe.frames / probe.samplerate
-        available = utterance["window"] + max(0.0, utterance["slack"] - SPEAKER_MARGIN)
+
+        head = int((utterance["start"] + lag) * rate)
+        if sequential and head < cursor and (cursor - head) / rate <= MAX_LAG:
+            head = cursor
+        late = head / rate - utterance["start"]
+
+        # Whatever the queue ate comes off the room this line has, so the read
+        # speeds up to make it back rather than pushing the lateness into the
+        # next line and the one after that.
+        available = max(0.0, utterance["window"] - late
+                        + max(0.0, utterance["slack"] - SPEAKER_MARGIN))
 
         # Per-character nudges. Characters do not all take the same treatment:
         # the brighter a voice, the more the air stage colours it, and a high
         # voice given the default reads as though it went through a vocoder.
-        nudge = tuning.get(utterance["speaker"], {})
+        # On a solo read the line's role rides on top of them.
+        nudge = nudges_for(utterance, tuning, shades, lifts)
         audio, factor = fit_to_slot(clip_path, generated, available, rate,
-                                    nudge.get("pitch", 0.0))
+                                    nudge.get("pitch", 0.0), nudge.get("pace", 1.0))
+        cursor = head + audio.size + int(SOLO_GAP * rate)
+
         spoken = voices[int(utterance["start"] * rate):int(utterance["end"] * rate)]
         produced = speech_level(audio, rate)
         lines.append({"utterance": utterance, "audio": audio, "factor": factor,
                       "generated": generated, "available": available,
+                      "head": head, "late": late, "nudge": nudge,
                       "target": speech_level(spoken.mean(axis=1), rate),
                       "produced": produced,
                       "brightness": (air_band(audio, rate)[1] / produced) if produced else 0.0})
@@ -501,7 +752,7 @@ def build_track(rendered, bed, voices, rate, air, tuning, overdubs=None):
     for line in lines:
         utterance, audio = line["utterance"], line["audio"]
         gain = min(max(line["raw_gain"], centre / MATCH_SPREAD), centre * MATCH_SPREAD)
-        gain *= tuning.get(utterance["speaker"], {}).get("gain", 1.0)
+        gain *= line["nudge"].get("gain", 1.0)
 
         placement = overdubs.get(utterance["id"])
         if placement is not None:
@@ -510,7 +761,7 @@ def build_track(rendered, bed, voices, rate, air, tuning, overdubs=None):
         else:
             left, right = CENTRE
 
-        head = int(utterance["start"] * rate)
+        head = min(line["head"], dub.shape[0])
         tail = min(head + audio.size, dub.shape[0])
         clip = audio[:tail - head] * gain
         dub[head:tail, 0] += clip * left
@@ -519,22 +770,125 @@ def build_track(rendered, bed, voices, rate, air, tuning, overdubs=None):
         # The span to take over from the original covers both the line as
         # spoken in Japanese and the dub that replaces it, whichever runs
         # longer, so no part of the original voice is left ringing underneath.
+        # A queued line starts after its own subtitle, so the span reaches back
+        # to the subtitle: otherwise the original's first words play in the
+        # clear before the dub arrives to cover them.
         pad = int(REPLACE_PAD * rate)
         geometry.append({
             "speaker": utterance["speaker"], "head": head, "tail": tail,
-            "replace_head": max(0, head - pad),
+            "replace_head": max(0, min(head, int(utterance["start"] * rate)) - pad),
             "replace_tail": min(dub.shape[0], max(tail, int(utterance["end"] * rate)) + pad)})
 
         report.append({"id": utterance["id"], "speaker": utterance["speaker"],
+                       "role": utterance.get("role"),
+                       # Where the line ended up and how long it holds, which
+                       # is what dub_inspect.py needs to tell the bed moving
+                       # from speech being added. It read neither before, so
+                       # its bed check silently never ran.
+                       "start_seconds": round(head / rate, 3),
+                       "held": round((tail - head) / rate, 3),
                        "generated": round(line["generated"], 2),
                        "available": round(line["available"], 2),
                        "compression": round(line["factor"], 3),
                        "gain": round(float(gain), 3),
+                       "late": round(line["late"], 3),
                        "pan": round(placement["pan"], 3) if placement else 0.0,
                        "overflow": round(max(0.0, line["generated"] / line["factor"]
                                              - line["available"]), 2)})
 
     return dub, report, geometry
+
+
+def subtitle_source(args, workdir):
+    """The subtitle track the dub was built from, to travel with it.
+
+    Taken from the video by default, which is right whenever the dub was
+    parsed from the release's own track. Where it was parsed from a subtitle
+    file cut for another release, that file is the one that belongs in the
+    output and `--subtitles` names it — the video's own track would be a
+    different translation at a different offset.
+    """
+    if args.subtitles:
+        return Path(args.subtitles)
+    if not args.video:
+        return None
+    try:
+        return extract_subtitles(args.video)
+    except SystemExit:
+        return None                 # a release with no text subtitles at all
+
+
+def write_spoken_subtitles(report, utterances, path, offset=0.0):
+    """A subtitle track of what the dub actually said, where it said it.
+
+    Not the same thing as the track the dub was built from, and the difference
+    is the point. Lines get rewritten to fit the time available, and a queued
+    line is spoken after its own subtitle, so the source track answers "what
+    does this scene mean" while this one answers "what did it just say" — the
+    question you have when a generated line comes out wrong.
+    """
+    by_id = {utterance["id"]: utterance for utterance in utterances}
+
+    def stamp(seconds):
+        hours, rest = divmod(max(0.0, seconds), 3600)
+        minutes, seconds = divmod(rest, 60)
+        return f"{int(hours):02d}:{int(minutes):02d}:{seconds:06.3f}".replace(".", ",")
+
+    blocks = []
+    for index, row in enumerate(sorted(report, key=lambda r: r["start_seconds"]), start=1):
+        utterance = by_id.get(row["id"])
+        if utterance is None:
+            continue
+        head = row["start_seconds"] - offset
+        blocks.append(f"{index}\n{stamp(head)} --> {stamp(head + row['held'])}\n"
+                      f"{utterance['text']}\n")
+
+    Path(path).write_text("\n".join(blocks), encoding="utf-8")
+    return len(blocks)
+
+
+def duck_original(original, dub, rate, depth_db, span=None):
+    """Pull the original mix down under the voice-over, and let it back up.
+
+    This is the other way to build a dub, and the one a single actor has
+    always been laid over: nothing is replaced. The original plays the whole
+    way through — its performances, its score, its effects — and simply steps
+    back while the voice-over talks.
+
+    It is the two stems summed rather than either one used alone, which is the
+    point: summing undoes the split, so whatever Demucs smeared going one way
+    is cancelled by the complementary smear going the other. A cast dub has to
+    keep the bed on its own and lives with that; here it never arises.
+
+    A duck has to be quick down and slow up. Quick, or the first syllable of
+    the translation lands under the original at full level; slow, or the score
+    lifts back into every gap between two lines and flutters.
+    """
+    frame = max(1, int(0.01 * rate))
+    mono = np.abs(dub).mean(axis=1) if dub.ndim > 1 else np.abs(dub)
+    usable = (mono.size // frame) * frame
+    envelope = mono[:usable].reshape(-1, frame).max(axis=1)
+
+    floor = 10 ** (-abs(depth_db) / 20.0)
+    speaking = envelope > 0.08 * speech_level(dub, rate)
+    target = np.where(speaking, floor, 1.0)
+
+    falling = np.exp(-1.0 / max(1.0, 0.03 * rate / frame))
+    rising = np.exp(-1.0 / max(1.0, 0.45 * rate / frame))
+    gain, current = np.empty_like(target), 1.0
+    for index, wanted in enumerate(target):
+        current = wanted + (current - wanted) * (falling if wanted < current else rising)
+        gain[index] = current
+
+    curve = np.interp(np.arange(original.shape[0]),
+                      np.arange(gain.size) * frame + frame / 2.0, gain,
+                      left=1.0, right=1.0).astype("float32")
+
+    # Reported over the span actually exported. Against the whole episode a
+    # preview of one scene reports how little of the episode that scene is,
+    # which reads as a broken duck rather than as a short preview.
+    counted = speaking[span[0] // frame:span[1] // frame] if span else speaking
+    return original * curve[:, None], float(counted.mean()) if counted.size else 0.0
 
 
 def replacement_mask(geometry, length, rate):
@@ -647,15 +1001,44 @@ def main():
                              "(default beside the utterances)")
     parser.add_argument("--no-overdubs", action="store_true",
                         help="render every line centred, even inside a resolved case")
+    parser.add_argument("--mix", choices=("replace", "voiceover"),
+                        help="replace the original voices with the dub, or duck the "
+                             "original and read over it (default: voiceover for a "
+                             "solo read, replace for a cast)")
+    parser.add_argument("--duck", type=float, default=DUCK_DB, metavar="DB",
+                        help=f"how far the original comes down under a voice-over "
+                             f"(default {DUCK_DB})")
+    parser.add_argument("--shades", metavar="JSON",
+                        help="per-role colouring for a solo read "
+                             "(default voices/shades.json)")
+    parser.add_argument("--subtitles", metavar="PATH",
+                        help="the subtitle file the dub was built from, muxed into the "
+                             "output beside it (default: the video's own track)")
+    parser.add_argument("--no-sequential", action="store_true",
+                        help="place every line at its own subtitle, even where one "
+                             "voice would then talk over itself")
+    parser.add_argument("--sequential", action="store_true",
+                        help="queue colliding lines instead of stacking them")
     args = parser.parse_args()
 
+
     start, end = parse_timecode(args.start), parse_timecode(args.end)
-    utterances = [u for u in json.loads(Path(args.utterances).read_text())
+    episode = json.loads(Path(args.utterances).read_text())
+    utterances = [u for u in episode
                   if (start is None or u["start"] >= start)
                   and (end is None or u["end"] <= end)]
     bank = json.loads(Path(args.voices, "bank.json").read_text())
     if not utterances:
         raise SystemExit("no utterances in that range")
+
+    # A solo read says so in the utterance list, and it wants the other set of
+    # defaults throughout: read over a ducked original rather than replacing
+    # separated voices, and queued rather than stacked, because the one thing
+    # one actor cannot do is talk over themselves.
+    solo = "role" in utterances[0]
+    mix = args.mix or ("voiceover" if solo else "replace")
+    sequential = (solo or args.sequential) and not args.no_sequential
+    lag = VOICEOVER_LAG if mix == "voiceover" else 0.0
 
     # A character with no clean audio of their own still gets dubbed, in the
     # closest voice the bank holds. A single original-language line dropped
@@ -732,6 +1115,14 @@ def main():
     if tuning:
         print("nudged: " + "; ".join(f"{name} {values}" for name, values in tuning.items()))
 
+    # Per-role colouring for a solo read. Anything not named here is coloured
+    # from its own name, which keeps a role consistent across a season without
+    # anybody having to write it down first.
+    shades_path = Path(args.shades) if args.shades else Path(args.voices, "shades.json")
+    overrides = json.loads(shades_path.read_text()) if shades_path.exists() else {}
+    roles = sorted({utterance["role"] for utterance in utterances
+                    if utterance.get("role")})
+
     understudy_path = Path(args.voices, "understudies.json")
     if understudy_path.exists() and not args.no_understudies:
         for speaker, entry in json.loads(understudy_path.read_text()).items():
@@ -742,6 +1133,33 @@ def main():
     voices, voice_rate = sf.read(Path(args.stems, "vocals.wav"), dtype="float32", always_2d=True)
     if voice_rate != rate or voices.shape != bed.shape:
         raise SystemExit("the two stems do not line up")
+
+    # Which way each line leans, measured off what the original voice was
+    # doing in that exact span. Nothing here needs to know who is speaking.
+    # Measured across the whole episode, not just the span being rendered. The
+    # neutral is the register the show mostly sits in, and a sixty-second
+    # preview of one scene does not contain it — judged inside the preview, a
+    # scene of one character would make that character the neutral and come
+    # out unshaded, so the preview would not show what the episode does.
+    shades = {role: {**shade_for(role), **overrides.get(role, {})} for role in roles}
+    lifts, role_shades, neutral = ({}, {}, 0.0)
+    if solo:
+        lifts, role_shades, neutral = line_shades(
+            episode, *track_pitch(voices, rate))
+
+    reader = bank.get(SOLO_ACTOR, {})
+    if solo and neutral:
+        who = reader.get("actor")
+        leaning = [lift for lift in lifts.values() if abs(lift) >= SHADE_STEP]
+        print(f"\nread by {who}" if who else "\nsolo read")
+        print(f"  the episode's own voices sit around {neutral:.0f} Hz; "
+              f"{len(lifts)} of its {len(episode)} lines\n  were measurable and "
+              f"{len(leaning)} of those lean far enough to hear")
+        if role_shades:
+            print(f"  by role, where the labelling named one:")
+            for role, (shade, pitch) in sorted(role_shades.items(),
+                                               key=lambda item: -item[1][1]):
+                print(f"    {role:<24}{pitch:>5} Hz  {shade:>+6.2f} st")
 
     from indextts.infer_v2 import IndexTTS2
     checkpoints = Path(args.checkpoints)
@@ -755,23 +1173,33 @@ def main():
     if not rendered:
         raise SystemExit("nothing was synthesized")
 
-    dub, report, geometry = build_track(rendered, bed, voices, rate, args.air, tuning, pan_for)
+    dub, report, geometry = build_track(rendered, bed, voices, rate, args.air, tuning,
+                                        pan_for, shades, sequential, lag, lifts)
 
     # Demucs splits the mix into exactly two parts, so summing them gives the
     # original back without re-reading the video.
     dub = compress_dialogue(dub, rate, args.compress)
-
     original = bed + voices
-    mask = replacement_mask(geometry, bed.shape[0], rate)[:, None]
-    replaced = bed * BED_GAIN + dub * DUB_GAIN
 
-    # Only inside the replaced spans. Everywhere else the original is already
-    # playing at full level, and adding a copy of it to itself would only
-    # comb-filter the parts of the episode that were never touched.
-    if args.leak > 0:
-        replaced = replaced + duck_centre(original, rate) * args.leak
+    exported = (int((start or 0) * rate),
+                int(end * rate) if end is not None else original.shape[0])
+    if mix == "voiceover":
+        ducked, share = duck_original(original, dub, rate, args.duck, exported)
+        mixed = ducked + dub * DUB_GAIN
+        print(f"\nread over the original, ducked {args.duck:.0f} dB across the "
+              f"{share * 100:.0f}% of the exported audio\nthe voice-over speaks; the "
+              f"rest plays at full level, and the stems are summed\nback rather than "
+              f"used apart, so no separation artefact survives")
+    else:
+        mask = replacement_mask(geometry, bed.shape[0], rate)[:, None]
+        replaced = bed * BED_GAIN + dub * DUB_GAIN
 
-    mixed = original * (1.0 - mask) + replaced * mask
+        # Only inside the replaced spans. Everywhere else the original is
+        # already playing at full level, and adding a copy of it to itself
+        # would only comb-filter the parts of the episode never touched.
+        if args.leak > 0:
+            replaced = replaced + duck_centre(original, rate) * args.leak
+        mixed = original * (1.0 - mask) + replaced * mask
 
     peak = np.abs(mixed).max()
     if peak > 0.99:
@@ -785,16 +1213,59 @@ def main():
     if args.video:
         clip = ["-ss", str(start)] if start is not None else []
         span = ["-t", str(end - (start or 0))] if end is not None else []
+
+        # A dub is a translation spoken by a machine, so the words it was
+        # working from travel with it. Two tracks, because they answer
+        # different questions: the source says what the scene means, and the
+        # spoken track says what the dub actually just said, which is the one
+        # you want the moment a line comes out wrong.
+        # Subtitles are shifted here rather than with ffmpeg's -ss. Input
+        # seeking a text subtitle lands on a cue boundary rather than on the
+        # time asked for, which put the source track ten seconds out on a
+        # preview and left a cue from before the export sitting at zero.
+        # Rewriting the timestamps is exact and needs no seeking at all.
+        spoken = workdir / "spoken.srt"
+        lines = write_spoken_subtitles(report, utterances, spoken, start or 0.0)
+
+        source = subtitle_source(args, workdir)
+        if source is not None and (start or end):
+            shifted = workdir / f"source{source.suffix}"
+            shift_file(source, shifted, -(start or 0.0),
+                       window=(0.0, (end - (start or 0.0)) if end else float("inf")))
+            source = shifted
+
+        # Inputs in a fixed order so the stream indices below are readable:
+        # the video, the finished mix, the source subtitles where there are
+        # any, and the track of what was actually spoken.
+        sources = ([source] if source is not None else []) + [spoken]
+        inputs = [argument for path in sources for argument in ("-i", str(path))]
+        maps = [argument for position in range(len(sources))
+                for argument in ("-map", f"{2 + position}:s:0")]
+
+        titles = ["English (the dub's source)", "English (as spoken)"][-len(sources):]
+        tags = [argument for position, title in enumerate(titles)
+                for argument in (f"-metadata:s:s:{position}", f"title={title}",
+                                 f"-metadata:s:s:{position}", "language=eng")]
+
         subprocess.run(["ffmpeg", "-v", "error",
                         *clip, "-i", str(args.video),
-                        *clip, "-i", str(full_mix), *span,
-                        "-map", "0:v:0", "-map", "1:a:0", "-map", "0:a:0",
-                        "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
+                        *clip, "-i", str(full_mix),
+                        *inputs,
+                        "-map", "0:v:0", "-map", "1:a:0", "-map", "0:a:0", *maps,
+                        # Copied rather than converted, so a fansub's own
+                        # typesetting arrives as the fansub drew it instead of
+                        # as SRT's font tags.
+                        "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-c:s", "copy",
                         "-metadata:s:a:0", "title=English (AI dub)",
                         "-metadata:s:a:0", "language=eng",
                         "-metadata:s:a:1", "title=Japanese",
                         "-disposition:a:0", "default",
-                        str(output), "-y"], check=True)
+                        *tags, "-disposition:s:0", "default",
+                        *span, str(output), "-y"], check=True)
+        print(f"\nmuxed {len(sources)} subtitle track(s): "
+              + ("the source the dub was built from, and " if source is not None
+                 else "no source track was found, only ")
+              + f"the {lines} lines it spoke, at the times it spoke them")
     else:
         sf.write(output, mixed, rate)
 
@@ -802,10 +1273,17 @@ def main():
 
     # Measured over the span actually exported. Against the whole episode the
     # number would just report how little of it this scene covers.
-    span = slice(int((start or 0) * rate),
-                 int(end * rate) if end is not None else mask.shape[0])
-    print(f"\n{float(mask[span].mean()) * 100:.0f}% of the exported audio uses the "
-          f"separated bed; the rest plays the original untouched")
+    if mix == "replace":
+        print(f"\n{float(mask[slice(*exported)].mean()) * 100:.0f}% of the exported "
+              f"audio uses the separated bed; the rest plays the original untouched")
+
+    if sequential:
+        queued = [row for row in report if row["late"] > lag + 0.05]
+        behind = max((row["late"] for row in report), default=0.0)
+        print(f"\n{len(queued)} lines waited for the previous one to finish, the "
+              f"latest by {behind:.1f}s")
+        for row in sorted(queued, key=lambda r: -r["late"])[:5]:
+            print(f"  line {row['id']} {row['late']:.1f}s late")
 
     gains = sorted(row["gain"] for row in report)
     if gains:
@@ -813,6 +1291,13 @@ def main():
         print(f"level matched per line: {20 * np.log10(quiet):+.1f} dB to "
               f"{20 * np.log10(loud):+.1f} dB against what the model produced, "
               f"a {20 * np.log10(loud / quiet):.0f} dB spread across the scene")
+
+    # Stamped on every row because the report is a list rather than a document
+    # with a header, and dub_inspect.py has to know which mix it is looking at:
+    # a bed that moves under the dialogue is a fault in one mode and the whole
+    # design in the other.
+    for row in report:
+        row["mix"] = mix
 
     compressed = [row for row in report if row["compression"] > 1.01]
     overflowed = [row for row in report if row["overflow"] > 0.25]

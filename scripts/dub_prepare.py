@@ -13,9 +13,11 @@ and re-encodes from it, which is not something to do over a streaming link.
 Usage:
     python3 scripts/dub_prepare.py "library/tv/Polar Bear Cafe/Season 01" --limit 4
     python3 scripts/dub_prepare.py "library/tv/Show/Season 01" --work dub
+    python3 scripts/dub_prepare.py "library/tv/Show/Season 01" --solo --subs subs/
 """
 
 import argparse
+import json
 import re
 import subprocess
 import sys
@@ -108,12 +110,53 @@ def split_stems(video, stem_root, slug_name, venv_python):
     return stem_dir
 
 
+def external_subtitles(subs, slug_name):
+    """The subtitle file to parse instead of the release's own track.
+
+    A labelled fansub is often cut for a different release, so it arrives as
+    loose files rather than inside the video. Line them up first with
+    scripts/dub_align.py — an unaligned script dubs the episode over the wrong
+    shots and every later stage will accept it happily.
+    """
+    if subs is None:
+        return None
+    path = Path(subs)
+    if path.is_file():
+        return path
+    matches = [candidate for candidate in sorted(path.iterdir())
+               if slug_name in candidate.name.lower()
+               and candidate.suffix.lower() in (".ass", ".ssa", ".srt")]
+    if not matches:
+        raise SystemExit(f"no subtitle file for {slug_name} in {path}")
+    return matches[0]
+
+
+def parsed_solo(utterances):
+    """Was this utterance list built as a solo read, or as a cast?"""
+    lines = json.loads(utterances.read_text())
+    return bool(lines) and "role" in lines[0]
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("season", help="a season directory, or a single episode")
-    parser.add_argument("--work", default="dub", help="working directory (default: dub)")
+    parser.add_argument("--work", default="dub",
+                        help="working directory (default: dub). One show per "
+                             "directory: episodes are named by season and episode "
+                             "number, so a second show sharing this one overwrites "
+                             "the first show's stems and scripts")
+    parser.add_argument("--venv", default="dub/.venv",
+                        help="the dub virtualenv (default: dub/.venv). Kept apart "
+                             "from --work because it is a tool rather than one "
+                             "show's working state")
     parser.add_argument("--limit", type=int, help="only prepare this many episodes")
+    parser.add_argument("--solo", action="store_true",
+                        help="parse for one voice actor reading the whole episode, "
+                             "for a track that labels no speakers")
+    parser.add_argument("--subs", metavar="PATH",
+                        help="a subtitle file, or a directory of them named by episode, "
+                             "to parse instead of the track inside the video")
     args = parser.parse_args()
 
     season = Path(args.season)
@@ -125,7 +168,7 @@ def main():
         raise SystemExit(f"no episodes found in {season}")
 
     work = Path(args.work)
-    venv_python = work / ".venv" / "bin" / "python"
+    venv_python = Path(args.venv) / "bin" / "python"
     script_tool = Path(__file__).parent / "dub_script.py"
     prepared = []
 
@@ -140,15 +183,24 @@ def main():
         print(f"  stems   {stem_dir}")
 
         utterances = work / "work" / f"{name}.utterances.json"
+        # A list parsed the other way round is not stale work to skip, it is
+        # the wrong file: a cast list has no roles to shade and a solo list has
+        # no characters to cast.
+        if utterances.exists() and parsed_solo(utterances) != args.solo:
+            print(f"  script  re-parsing, {utterances.name} was built the other way")
+            utterances.unlink()
         if not utterances.exists():
-            subprocess.run([sys.executable, str(script_tool), str(video),
-                            "-o", str(utterances)], check=True)
+            script_source = external_subtitles(args.subs, name) or video
+            subprocess.run([sys.executable, str(script_tool), str(script_source),
+                            "-o", str(utterances), *(["--solo"] if args.solo else [])],
+                           check=True)
         print(f"  script  {utterances}")
         prepared.append((utterances, stem_dir))
 
     print(f"\nprepared {len(prepared)} episodes. Mint the voice bank with:\n")
     pairs = " \\\n    ".join(f"--episode {utterance} {stem}" for utterance, stem in prepared)
-    print(f"  {venv_python} scripts/dub_voices.py -o {work}/voices/ \\\n    {pairs}")
+    solo = " --solo" if args.solo else ""
+    print(f"  {venv_python} scripts/dub_voices.py -o {work}/voices/{solo} \\\n    {pairs}")
 
     return 0
 
