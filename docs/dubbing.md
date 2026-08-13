@@ -218,6 +218,85 @@ the reference is clean, suspect the fitting stage rather than the clone.
 `scripts/dub_script.py --scenes N` ranks the best scenes to preview, by how
 many characters speak in them. A preview with one voice in it proves nothing.
 
+### 5. Render the rest of the season
+
+One episode is a quarter hour of GPU, so a season is most of a working day of
+it, and nobody sits through that in one go. `scripts/dub_season.py` runs the
+episodes one at a time, stops whenever it is asked to, and resumes from where
+it stopped — including from a different session days later.
+
+It reads one plan file, and that file is the whole memory of the run:
+
+```json
+{
+  "show": "Polar Bear Cafe",
+  "aliases": ["Shirokuma Cafe", "panda"],
+  "season": 1,
+  "work": "dub/work",
+  "voices": "dub/voices_test",
+  "stems": "dub/stems/htdemucs",
+  "source": "dub/source",
+  "library": "dub/finished/tv",
+  "python": "dub/.venv/bin/python",
+  "queue": "gpu",
+  "options": []
+}
+```
+
+Every key but `show` has the default shown above, and `options` goes to
+`dub_render.py` verbatim — which is where a season-wide `--solo` belongs.
+Plans are found at `dub/*/season.json`, and paths inside one are relative to
+the repository rather than to wherever the command was run.
+
+A season is named by its title or by any of its `aliases`, so a show asked for
+under a title it also goes by resolves without anyone knowing where its files
+live. Naming nothing means every prepared season — what you want from a status
+and not from a run.
+
+```bash
+python3 scripts/dub_season.py --status                     # every season
+python3 scripts/dub_season.py "Shirokuma Cafe" --status    # where one stands
+python3 scripts/dub_season.py "Shirokuma Cafe"             # run, or carry on
+python3 scripts/dub_season.py "Shirokuma Cafe" --limit 1   # just the next one
+python3 scripts/dub_season.py --halt                       # stop whatever is going
+```
+
+When a show is asked for under a title its plan does not list, put the title
+in `aliases` rather than resolving it once and moving on. The next session
+resolving it is the point.
+
+**Nothing about the run is written down.** Where it got to is read off the
+disk every time: an episode is done because the episode is in the library, and
+a line is drawn because its clip is in `dub/work/clips/`. A progress note can
+be wrong; a file cannot. This is why a session that knows nothing about an
+earlier one can pick the season up correctly.
+
+**Stopping is a file.** `--halt` writes `dub/work/PAUSE`, and the render checks
+for it between lines. It is a file rather than a signal because the session
+asking for the stop is often not the session that started the run and has no
+process to signal — and because the render sits behind `processqueue`, so a
+forwarded signal reaches the queue wrapper rather than the python holding the
+model. Running `dub_season.py` again clears the file: running it *is* the
+instruction to run, so start and resume are the same command.
+
+**A stop costs one line.** Each drawn line is written to
+`dub/work/clips/<episode>/` with a stamp of the text and voice it came from,
+and a resumed render reuses every clip whose stamp still matches. So the price
+of stopping is the line in the model's hands, not the quarter hour behind it.
+The stamp is what makes reuse safe: change an adaptation, or re-mint the voice
+bank, and the affected lines redraw instead of quietly keeping the old take.
+The clips are cleared once the episode is finished — `--keep-clips` on
+`dub_render.py` keeps them.
+
+**A killed render never leaves a broken episode.** The mux writes to a hidden
+`.partial` file beside the finished name and moves it into place only when
+ffmpeg has returned, so Emby cannot index a truncated mkv. The timing report
+lands first, so the episode and its report always appear together.
+
+Asked to stop while an episode is already mixing, the render finishes it. That
+part is CPU and minutes; the GPU is already idle, which is what the stop was
+for. It then exits without starting another.
+
 ## Giving overlapping dialogue a stereo position
 
 Rare, and worth its own pass rather than a fixed rule in `dub_render.py`: two

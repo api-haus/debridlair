@@ -23,6 +23,8 @@ Usage:
 import argparse
 import hashlib
 import json
+import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -164,6 +166,58 @@ SOLO_GAP = 0.12
 # voices is the smaller error.
 MAX_LAG = 2.5
 
+# Exit code for a render that stopped because it was asked to. Distinct from a
+# failure, because everything it had drawn is on disk and the next run carries
+# straight on from there.
+EXIT_PAUSED = 75
+
+
+class Paused(Exception):
+    """A stop asked for between lines. What was drawn already is on disk."""
+
+
+_stop_asked = False
+
+
+def watch_for_stop(pause_file=None):
+    """Let a signal, or a file, ask this render to stop between lines.
+
+    Both, because they answer different situations. A signal is what the
+    session that started the render has to hand. The file is what a session
+    which does not own the process can reach, and that is the one that matters
+    when the stop is asked for days later from somewhere else.
+    """
+    def stop(number, frame):
+        global _stop_asked
+        if _stop_asked:
+            raise KeyboardInterrupt      # asked twice means now, cache be damned
+        _stop_asked = True
+        print("\nstopping after the line being drawn", flush=True)
+
+    for number in (signal.SIGINT, signal.SIGTERM):
+        signal.signal(number, stop)
+    return Path(pause_file) if pause_file else None
+
+
+def stop_asked(pause_file):
+    return _stop_asked or (pause_file is not None and pause_file.exists())
+
+
+def clip_stamp(text, references, fits, emo):
+    """What a cached clip was drawn from, so a later run knows to trust it.
+
+    A clip is only worth keeping if the next run would ask for the same thing.
+    The reference is stamped by its size as well as its name, so a rebuilt
+    voice bank redraws the character rather than quietly reusing the old one,
+    while a bank merely re-saved unchanged does not cost an episode of GPU.
+
+    Lists rather than tuples throughout, because the stamp is compared against
+    its own JSON: a tuple written out comes back a list and never matches what
+    wrote it, which silently costs the whole cache.
+    """
+    return {"text": text, "emo": bool(emo), "fits": round(fits, 2),
+            "voices": sorted([str(path), Path(path).stat().st_size]
+                             for path in references)}
 
 
 def parse_timecode(value):
@@ -421,7 +475,8 @@ def room_for(utterance):
     return utterance["window"] + max(0.0, utterance["slack"] - SPEAKER_MARGIN)
 
 
-def synthesize(tts, utterances, bank, workdir, emo_from_text, attempts=RESYNTH_ATTEMPTS):
+def synthesize(tts, utterances, bank, workdir, emo_from_text, attempts=RESYNTH_ATTEMPTS,
+               clips=None, pause_file=None):
     """Generate one wav per utterance, in that character's cloned voice.
 
     A line that will not fit even at the compression ceiling is generated
@@ -430,9 +485,17 @@ def synthesize(tts, utterances, bank, workdir, emo_from_text, attempts=RESYNTH_A
     four words taking three seconds, at half the rate it usually speaks. That
     is a bad sample from a stochastic model, not a line that is too long, and
     the answer to a bad sample is another sample.
+
+    This is the whole GPU cost of an episode and the only slow part of it, so
+    it is also the only part worth being able to stop inside. With a clip
+    directory the lines already drawn stay drawn, and a stop costs the one line
+    in the model's hands rather than the quarter hour behind it.
     """
-    rendered = []
+    rendered, reused = [], 0
     for utterance in utterances:
+        if stop_asked(pause_file):
+            raise Paused()
+
         # A line somebody has marked as not to be spoken. The parser cannot
         # tell a translator's note from an aside, so this is where a reading
         # of the episode gets to say so.
@@ -448,6 +511,17 @@ def synthesize(tts, utterances, bank, workdir, emo_from_text, attempts=RESYNTH_A
 
         kwargs = {"use_emo_text": True, "emo_alpha": 0.8} if emo_from_text else {}
         fits = room_for(utterance) * MAX_COMPRESSION
+
+        stamp = clip_stamp(utterance["text"], [bank[name]["path"] for name in speaking],
+                           fits, kwargs)
+        drawn = (clips or workdir) / f"{utterance['id']:04d}.wav"
+        beside = drawn.with_suffix(".json")
+        if clips and drawn.exists() and beside.exists():
+            if json.loads(beside.read_text()) == stamp:
+                rendered.append((utterance, drawn))
+                reused += 1
+                continue
+
         takes, retries = [], 0
         for name in speaking:
             take = draw_line(tts, bank[name]["path"], utterance["text"], fits,
@@ -462,9 +536,17 @@ def synthesize(tts, utterances, bank, workdir, emo_from_text, attempts=RESYNTH_A
             continue
 
         audio, sample_rate = (takes[0] if len(takes) == 1 else lay_together(takes))
-        output = workdir / f"{utterance['id']:04d}.wav"
-        sf.write(output, audio, sample_rate)
-        rendered.append((utterance, output))
+
+        # The wav appears whole or not at all, and its stamp is written only
+        # once it has. A clip caught half-written by a kill has nothing beside
+        # it claiming it is finished, so the next run draws it again instead of
+        # mixing in a truncated line.
+        staged = drawn.with_suffix(".part")
+        sf.write(staged, audio, sample_rate, format="WAV")
+        staged.replace(drawn)
+        if clips:
+            beside.write_text(json.dumps(stamp))
+        rendered.append((utterance, drawn))
 
         note = f"  (redrawn {retries}x)" if retries else ""
         if len(takes) > 1:
@@ -472,6 +554,8 @@ def synthesize(tts, utterances, bank, workdir, emo_from_text, attempts=RESYNTH_A
         print(f"  [{utterance['id']:>3}] {utterance['speaker']:<12} "
               f"{utterance['text'][:52]}{note}")
 
+    if reused:
+        print(f"  kept {reused} lines drawn before the last stop")
     return rendered
 
 
@@ -1017,10 +1101,25 @@ def main():
     parser.add_argument("--no-sequential", action="store_true",
                         help="place every line at its own subtitle, even where one "
                              "voice would then talk over itself")
+    parser.add_argument("--clips", metavar="DIR",
+                        help="keep each drawn line here, and reuse what is "
+                             "already in it; this is what makes a stopped "
+                             "render resume rather than start over")
+    parser.add_argument("--keep-clips", action="store_true",
+                        help="leave the clip directory behind after a "
+                             "successful render instead of clearing it")
+    parser.add_argument("--pause-file", metavar="PATH",
+                        help="stop between lines while this file exists")
     parser.add_argument("--sequential", action="store_true",
                         help="queue colliding lines instead of stacking them")
     args = parser.parse_args()
 
+    # Installed before the model is loaded, which is half a minute on its own,
+    # so a stop asked during the load is still honoured at the first line.
+    pause_file = watch_for_stop(args.pause_file)
+    clips = Path(args.clips) if args.clips else None
+    if clips:
+        clips.mkdir(parents=True, exist_ok=True)
 
     start, end = parse_timecode(args.start), parse_timecode(args.end)
     episode = json.loads(Path(args.utterances).read_text())
@@ -1168,8 +1267,15 @@ def main():
 
     workdir = Path(tempfile.mkdtemp())
     print(f"speaking {len(utterances)} lines")
-    rendered = synthesize(tts, utterances, bank, workdir, args.emo_from_text,
-                          args.attempts)
+    try:
+        rendered = synthesize(tts, utterances, bank, workdir, args.emo_from_text,
+                              args.attempts, clips, pause_file)
+    except Paused:
+        held = len(list(clips.glob("*.wav"))) if clips else 0
+        print(f"\npaused with {held} of {len(utterances)} lines drawn; nothing "
+              f"was written to {args.output}" if clips else
+              "\npaused; without --clips the lines drawn so far are lost")
+        return EXIT_PAUSED
     if not rendered:
         raise SystemExit("nothing was synthesized")
 
@@ -1207,6 +1313,17 @@ def main():
 
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
+
+    # Built under a name of its own and moved onto the finished one only when
+    # it is complete, so a render killed inside ffmpeg cannot leave a truncated
+    # episode for Emby to index. Beside the finished name, so the move is a
+    # rename within one directory and cannot half-happen. The leading dot keeps
+    # the unfinished file out of the library's way meanwhile, and the extension
+    # stays on the end because both ffmpeg and soundfile choose what to write
+    # by looking at it — named `.partial`, ffmpeg cannot tell it is matroska.
+    staged = output.with_name(f".{output.stem}.partial{output.suffix}")
+    staged.unlink(missing_ok=True)
+
     full_mix = workdir / "dub.wav"
     sf.write(full_mix, mixed, rate)
 
@@ -1261,13 +1378,13 @@ def main():
                         "-metadata:s:a:1", "title=Japanese",
                         "-disposition:a:0", "default",
                         *tags, "-disposition:s:0", "default",
-                        *span, str(output), "-y"], check=True)
+                        *span, str(staged), "-y"], check=True)
         print(f"\nmuxed {len(sources)} subtitle track(s): "
               + ("the source the dub was built from, and " if source is not None
                  else "no source track was found, only ")
               + f"the {lines} lines it spoke, at the times it spoke them")
     else:
-        sf.write(output, mixed, rate)
+        sf.write(staged, mixed, rate)
 
     report_voice_drift(dub, rate, geometry, bank)
 
@@ -1305,8 +1422,28 @@ def main():
           f"{len(overflowed)} still overrunning")
     for row in sorted(overflowed, key=lambda r: -r["overflow"])[:5]:
         print(f"  line {row['id']} {row['speaker']}: {row['overflow']}s over")
-    Path(str(output) + ".timing.json").write_text(json.dumps(report, indent=1))
+
+    # The timing lands first and the episode second, so the moment the episode
+    # exists under its finished name the report that describes it is already
+    # there. Nothing downstream ever sees one without the other.
+    Path(str(staged) + ".timing.json").write_text(json.dumps(report, indent=1))
+    Path(str(staged) + ".timing.json").replace(str(output) + ".timing.json")
+    staged.replace(output)
     print(f"wrote {output}")
+
+    # Only now, with the episode finished on disk, are the clips spent. Keeping
+    # them would cost a few hundred megabytes an episode to hold a cache whose
+    # only job was to survive an interruption that did not happen.
+    if clips and not args.keep_clips:
+        shutil.rmtree(clips, ignore_errors=True)
+
+    # Asked to stop while the mix was already running. The episode was worth
+    # finishing — it was minutes of CPU from done, and the GPU was idle — but
+    # the caller still needs to hear that a stop was asked for.
+    if stop_asked(pause_file):
+        print("stop was asked for during the mix; this episode finished, "
+              "nothing further will start")
+        return EXIT_PAUSED
 
     return 0
 
