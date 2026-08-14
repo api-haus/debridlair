@@ -159,9 +159,28 @@ not read `.cue`: a single-file image plays as one long track rather than a
 track list. Ceilings are `ALBUM_MAX` (5 GB) and `DISCOG_MAX` (60 GB) for a
 name that says discography, anthology, complete or box set.
 
-A whole discography is one search per album, not one search for the artist —
-box torrents are rare for jazz, and per-album releases carry better tags and
-seed better. Search the artist with `--list` first, then queue what is there.
+**A whole catalogue goes through `scripts/torbox_disco.py`**, which searches,
+keeps the best release per album, drops what the library already holds, and
+queues the rest. Give it every spelling the artist circulates under; a tracker
+that indexes one will not always index the other.
+
+```bash
+python3 scripts/torbox_disco.py "David S. Ware" --list
+python3 scripts/torbox_disco.py "Shibusashirazu" "Shibusa Shirazu"
+python3 scripts/torbox_disco.py --drain           # queue what now fits
+```
+
+**Torbox runs only a plan's worth of downloads at once**, and a burst past that
+is accepted, silently dropped, and answered with a day-long account cooldown
+(`cooldown_until` on `/user/me`). Queuing 31 albums at once landed 4 — the ones
+Torbox already held — and cost a cooldown. So `torbox_disco.py` queues what
+fits and writes the rest to `sync-state/album_queue.tsv`; `--drain` runs
+hourly from the `torbox-sync` loop and sends the next few as slots free. Do
+not work around this by adding torrents in a shell loop.
+
+An indexer that matches nothing answers with whatever is popular rather than
+an empty list, so the tool keeps only releases whose title carries the artist
+name. A query in the wrong script came back as 82 audiobooks.
 
 Fast-track it in the same way as a film, then check it landed:
 
@@ -424,8 +443,8 @@ tidy up, because that is the resume point. Full detail in `docs/dubbing.md`.
 
 - `docker-compose.yml` — emby, torbox-mount (rclone WebDAV FUSE),
   torbox-sync (15-min loop), prowlarr, flaresolverr
-- `scripts/` — torbox_sync.py, torbox_find.py, torbox_add.py, emby_setup.py,
-  emby_probe.py, emby_subs.py
+- `scripts/` — torbox_sync.py, torbox_find.py, torbox_disco.py, torbox_add.py,
+  emby_setup.py, emby_probe.py, emby_subs.py
 - `sync-state/emby_api_key` — Emby API key
 - Skip-intro pipeline: StrmAssistant fingerprint task daily 03:47, native
   Detect Episode Intros 05:33. New episodes get markers within ~a day.

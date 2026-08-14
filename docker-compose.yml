@@ -63,6 +63,7 @@ services:
         python3 /scripts/emby_probe.py --limit 150 || true;
         i=$$((i+1));
         [ $$((i % 4)) -ne 0 ] || python3 /scripts/torbox_watch.py || true;
+        [ $$((i % 4)) -ne 0 ] || python3 /scripts/torbox_disco.py --drain || true;
         sleep 780;
       done"
     volumes:
