@@ -327,7 +327,7 @@ def split_artist_album(name, default_artist=None):
     name = clean_audio_tags(YEAR_SPAN.sub(r"\1", name))
     # "1996-Godspelized" glues the year on with no space, so the dash split
     # below never sees it and the year ends up inside the album name
-    year_pfx = re.match(r"^\(?((?:19|20)\d{2})\)?\s*[-–—.]\s*(?=\S)", name)
+    year_pfx = re.match(r"^\(?((?:19|20)\d{2})\)?[\s.\-–—]+(?=\S)", name)
     if year_pfx:
         name = name[year_pfx.end():]
     segs = [s.strip(STRIP_CHARS) for s in DASH_SPLIT.split(name)]
