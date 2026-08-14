@@ -33,7 +33,10 @@ MAX_PRUNE_FRACTION = 0.25
 MASS_PRUNE_FLOOR = 20
 
 VIDEO_EXT = {".mkv", ".mp4", ".avi", ".m4v", ".ts", ".mov", ".wmv",
-             ".flv", ".webm", ".mpg", ".mpeg", ".m2ts", ".vob", ".ogm"}
+             ".flv", ".webm", ".mpg", ".mpeg", ".m2ts", ".ogm"}
+# .vob deliberately excluded: a raw DVD title fragment (VIDEO_TS/VTS_NN_M.VOB)
+# has no filename that says which fragment is the feature vs. a menu loop,
+# unlike a demuxed release — so it's never synced in as a library item.
 AUDIO_EXT = {".flac", ".ape", ".wv", ".alac", ".m4a", ".mp3", ".ogg", ".opus",
              ".wav", ".aiff", ".aif", ".dsf", ".dff", ".mpc", ".tta", ".wma"}
 LOSSLESS_EXT = {".flac", ".ape", ".wv", ".alac", ".wav", ".aiff", ".aif",
@@ -128,6 +131,9 @@ TITLE_OVERRIDES = {
     "gojira 1954 rm4k": "Godzilla (1954)",
     "2021 08 25)evangelion 3 333 you can (not) redo":
         "Evangelion 3.0 - You Can (Not) Redo (2012)",
+    "ki-duk kim - bi-mong aka dream (2008)": "Dream (2008)",
+    "elsecretodeunaobsesionm1080": "Secret in Their Eyes (2015)",
+    "arirang 2011 dvdrip [1 46]": "Arirang (2011)",
 }
 # Series whose releases circulate under more than one title (romaji vs the
 # English broadcast name). Without this the same show lands in two folders and
@@ -646,7 +652,11 @@ def collect(kind, key):
         for f, rel_parts in non_tv:
             stem = os.path.splitext(rel_parts[-1])[0]
             title = clean_show(stem)
-            is_feature = (f.get("size") or 0) >= MAIN_FILE_MIN_SIZE
+            # The lone video in the whole item can't be a bonus to anything
+            # else — a small encode (e.g. a hardsub satellite rip) shouldn't
+            # get shelved as a parentless "Featurette" for missing the bar.
+            is_feature = (f.get("size") or 0) >= MAIN_FILE_MIN_SIZE \
+                or len(non_tv) == 1
             if is_feature or (title and YEAR_PAREN_END.search(title)):
                 release_ids.add(id(f))
                 main_titles.setdefault((title or stem).lower(), title or stem)
