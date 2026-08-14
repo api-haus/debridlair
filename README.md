@@ -87,6 +87,13 @@ Emby match intros per season. New episodes get their markers within a day.
 episode you already have, queues only what comes after, and notices a new
 season premiering instead of waiting for one you named.
 
+**Music.** Albums stream the same way films do — ask for one, and it is in
+Emby's Music library as `Artist/Album (Year)/tracks`, with the release's own
+cover art, playing lossless FLAC straight off the debrid provider. Lossy rips
+are refused unless you ask for them. Emby lists music as folders rather than
+album cards, which is a limit of what it does with `.strm`; see
+[docs/library.md](docs/library.md).
+
 ## Getting started
 
 You need Docker with `/dev/fuse`, a [Torbox](https://torbox.app) account, and
@@ -128,7 +135,8 @@ and ranks releases, `torbox_add.py` queues a magnet directly, `torbox_sync.py`
 builds the library, `torbox_watch.py` tops up airing shows, `emby_probe.py`
 forces Emby to probe streams it would otherwise ignore until playback, and
 `emby_setup.py` bootstraps a fresh server. Each runs standalone, if you ever
-want to bypass the agent entirely.
+want to bypass the agent entirely. Every rule the sync applies while filing a
+release is written down in [docs/library.md](docs/library.md).
 
 **Things worth knowing if you rebuild this elsewhere:**
 

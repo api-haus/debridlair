@@ -4,12 +4,16 @@
 Usage:
     python3 torbox_find.py "Sinners 2025"             # movie, auto-pick best
     python3 torbox_find.py "The Pitt S01" --tv        # TV search categories
+    python3 torbox_find.py "Third Ear Recitation" --music   # album, lossless
     python3 torbox_find.py "Sinners 2025" --list      # show top 10, pick with -n
     python3 torbox_find.py "Sinners 2025" -n 3        # queue result #3
     python3 torbox_find.py "Sinners 2025" --allow-fat # include over-cap releases
+    python3 torbox_find.py "Album" --music --allow-lossy   # accept MP3 etc.
 
 Releases that can never stream within the 40 Mbit emby throttle (remuxes,
 movies >30 GB, episodes >12 GB, packs >80 GB) are refused by default.
+Under --music a lossy release is refused the same way, and a track-split rip
+outranks a single-file CUE image, which Emby plays as one long track.
 
 After queuing, the torbox-sync loop (15 min) writes the .strm files and Emby
 picks the title up automatically.
@@ -33,6 +37,9 @@ from torbox_sync import load_env  # noqa: E402
 PROWLARR = os.environ.get("PROWLARR_URL", "http://localhost:9696")
 TV_CATS = "5000,5010,5020,5030,5040,5045,5050"      # TV + HD/SD/UHD
 MOVIE_CATS = "2000,2010,2020,2030,2040,2045,2050,2060"  # Movies
+AUDIO_CATS = "3000,3010,3040,3050"                  # Audio + MP3/Lossless/Other
+LOSSLESS_CAT = 3040
+LOSSY_CAT = 3010
 
 
 def resolve_grab(url):
@@ -82,13 +89,47 @@ ORIG_PAT = re.compile(
     r"\b(original|eng(lish)?|multi[dti]?|dual|jpn|jap(anese)?|vostfr?)\b", re.I)
 
 
+# FLAC streams at 1-10 Mbit, so these ceilings are about patience and disk,
+# not the 40 Mbit cap: an album, and a discography box or complete-works set.
+ALBUM_MAX = 5e9
+DISCOG_MAX = 60e9
+BOXSET = re.compile(r"\b(discograph|anthology|collection|complete|box\s?set|"
+                    r"works|antologi)", re.I)
+LOSSLESS_PAT = re.compile(
+    r"\b(flac|ape|wv|wavpack|alac|tta|dsd|dsf|sacd|lossless|wav|"
+    r"\d{2}\s?bit|24-?96|24-?192)\b", re.I)
+LOSSY_PAT = re.compile(
+    r"\b(mp3|aac|m4a|ogg|vorbis|opus|lame|vbr|cbr|\d{3}\s?kbps|v0|v2)\b", re.I)
+# A rip stored as one file per album: Emby plays it as a single long track
+CUE_IMAGE = re.compile(r"\bimage\s*\+\s*\.?cue|\bimage\b(?![^\[\(]*tracks)|"
+                       r"\bone\s*file\b", re.I)
+CUE_TRACKS = re.compile(r"\btracks?\s*\+\s*\.?cue|\btracks\b", re.I)
+
+
 def dub_only(title):
     """True if the release looks dub-only (no original audio track)."""
     return bool(DUB_PAT.search(title)) and not ORIG_PAT.search(title)
 
 
-def size_limit(title):
+def cat_ids(r):
+    return {c.get("id") for c in (r.get("categories") or [])}
+
+
+def lossless(r):
+    """True/False if the release states its format, None if it does not."""
+    title = r.get("title") or ""
+    cats = cat_ids(r)
+    if LOSSLESS_CAT in cats or LOSSLESS_PAT.search(title):
+        return True
+    if LOSSY_CAT in cats or LOSSY_PAT.search(title):
+        return False
+    return None
+
+
+def size_limit(title, music=False):
     """Max acceptable release size in bytes for this title."""
+    if music:
+        return DISCOG_MAX if BOXSET.search(title) else ALBUM_MAX
     if re.search(r"[sS]\d{1,2}[eE]\d{1,3}", title):
         return EP_MAX
     if re.search(r"[sS]\d{1,2}\b|season\s*\d", title, re.I):
@@ -96,15 +137,32 @@ def size_limit(title):
     return MOVIE_MAX
 
 
-def over_limit(r):
+def over_limit(r, music=False, allow_lossy=False):
     title = r.get("title") or ""
+    if (r.get("size") or 0) > size_limit(title, music):
+        return "size"
+    if music:
+        # "dub" is a genre here and "remux" means nothing, so neither applies
+        if not allow_lossy and lossless(r) is False:
+            return "lossy"
+        return None
     if REMUX.search(title):
         return "remux"
-    if (r.get("size") or 0) > size_limit(title):
-        return "size"
     if dub_only(title):
         return "dub-only"
     return None
+
+
+def music_score(r):
+    title = r.get("title") or ""
+    s = min(int(r.get("seeders") or 0), 500)
+    s += 2000 if lossless(r) is True else 0
+    s += 300 if CUE_TRACKS.search(title) else 0
+    s -= 300 if CUE_IMAGE.search(title) and not CUE_TRACKS.search(title) else 0
+    s += 100 if re.search(r"\b24\s?bit|24-?96|24-?192\b", title, re.I) else 0
+    if (r.get("size") or 0) < 20e6:                 # a single track, not a set
+        s -= 100000
+    return s
 
 
 def score(r):
@@ -134,9 +192,10 @@ def prowlarr_key():
     return key
 
 
-def search(query, tv=True, allow_fat=False, key=None):
+def search(query, tv=True, allow_fat=False, key=None, music=False,
+           allow_lossy=False):
     """Return (acceptable releases best-first, releases refused as over-cap)."""
-    cats = TV_CATS if tv else MOVIE_CATS
+    cats = AUDIO_CATS if music else TV_CATS if tv else MOVIE_CATS
     q = urllib.parse.urlencode(
         [("query", query), ("limit", 100)]
         + [("categories", c) for c in cats.split(",")])
@@ -144,9 +203,11 @@ def search(query, tv=True, allow_fat=False, key=None):
                if r.get("magnetUrl") or r.get("downloadUrl")]
     fat = []
     if not allow_fat:
-        fat = [r for r in results if over_limit(r)]
-        results = [r for r in results if not over_limit(r)]
-    results.sort(key=score, reverse=True)
+        def bad(r):
+            return over_limit(r, music, allow_lossy)
+        fat = [r for r in results if bad(r)]
+        results = [r for r in results if not bad(r)]
+    results.sort(key=music_score if music else score, reverse=True)
     return results, fat
 
 
@@ -168,10 +229,19 @@ def main():
     pick = None
     if "-n" in flags:
         pick = int(args[1]) if len(args) > 1 else None
+    music = "--music" in flags
+    allow_lossy = "--allow-lossy" in flags
     results, fat = search(query, tv="--tv" in flags,
-                          allow_fat="--allow-fat" in flags)
+                          allow_fat="--allow-fat" in flags,
+                          music=music, allow_lossy=allow_lossy)
     if "--allow-fat" not in flags:
-        if fat:
+        if fat and music:
+            lossy = sum(1 for r in fat
+                        if over_limit(r, True, allow_lossy) == "lossy")
+            print(f"skipped {len(fat)} releases ({lossy} lossy, rest over "
+                  f"{int(ALBUM_MAX//1e9)} GB; --allow-lossy / --allow-fat to "
+                  f"include)", file=sys.stderr)
+        elif fat:
             print(f"skipped {len(fat)} over-limit releases "
                   f"(remux / >{int(EP_MAX//1e9)} GB ep / >{int(MOVIE_MAX//1e9)} GB movie / "
                   f">{int(PACK_MAX//1e9)} GB pack; --allow-fat to include)", file=sys.stderr)
@@ -182,7 +252,8 @@ def main():
         sys.exit(f"no results with magnets for {query!r}")
     if "--list" in flags or pick is None and "-n" in flags:
         for i, r in enumerate(results[:10], 1):
-            mark = f" [over cap: {over_limit(r)}]" if over_limit(r) else ""
+            why = over_limit(r, music, allow_lossy)
+            mark = f" [over cap: {why}]" if why else ""
             print(f"{i:2d}. [{r.get('indexer')}] {r.get('seeders')} seeds, "
                   f"{(r.get('size') or 0)/1e9:.1f} GB | {r.get('title')}{mark}")
         if pick is None:
@@ -191,9 +262,10 @@ def main():
     if n < 0 or n >= len(results):
         sys.exit(f"pick 1-{min(len(results), 10)}")
     r = results[n]
-    if over_limit(r):
+    why = over_limit(r, music, allow_lossy)
+    if why:
         sys.exit(f"refusing: {r.get('title')} exceeds the 40 Mbit streamability "
-                 f"cap ({over_limit(r)}); pick another or use --allow-fat")
+                 f"cap ({why}); pick another or use --allow-fat")
     queue(r)
 
 

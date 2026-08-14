@@ -16,6 +16,8 @@ from pathlib import Path
 BASE = Path(__file__).resolve().parent.parent
 LIB_TV = BASE / "library" / "tv"
 LIB_MOVIES = BASE / "library" / "movies"
+LIB_MUSIC = BASE / "library" / "music"
+LIB_ROOTS = (LIB_TV, LIB_MOVIES, LIB_MUSIC)
 API = "https://api.torbox.app/v1/api"
 # Guards against a partial API result being mistaken for a mass delete: refuse
 # to prune more than this share of an already-populated library unprompted.
@@ -24,8 +26,14 @@ MASS_PRUNE_FLOOR = 20
 
 VIDEO_EXT = {".mkv", ".mp4", ".avi", ".m4v", ".ts", ".mov", ".wmv",
              ".flv", ".webm", ".mpg", ".mpeg", ".m2ts", ".vob", ".ogm"}
+AUDIO_EXT = {".flac", ".ape", ".wv", ".alac", ".m4a", ".mp3", ".ogg", ".opus",
+             ".wav", ".aiff", ".aif", ".dsf", ".dff", ".mpc", ".tta", ".wma"}
+LOSSLESS_EXT = {".flac", ".ape", ".wv", ".alac", ".wav", ".aiff", ".aif",
+                ".dsf", ".dff", ".tta"}
 # Below this a "video" file is a broken/placeholder upload, not real content
 MIN_VIDEO_SIZE = 3 * 1024 * 1024
+# Below this an "audio" file is a rip artefact, not a piece of music
+MIN_AUDIO_SIZE = 200 * 1024
 # A batch's biggest non-TV file only counts as "the real movie" (as opposed
 # to an unusually long bonus clip) above this size
 MAIN_FILE_MIN_SIZE = 700 * 1024 * 1024
@@ -39,10 +47,7 @@ DOT_EP_PAT = re.compile(r"^(\d{1,2})\.(\d{1,3})(\s*-\s*|\s+)")
 EP_TOKEN = re.compile(r"[sS](\d{1,4})[eE][pP]?(\d{1,4})")
 # 7x01 style
 X_TOKEN = re.compile(r"\b(\d{1,2})x(\d{1,3})\b")
-# Anime-style absolute numbering: "[Group] Show Name - 03 [1080p...]" or
-# "Show Name - E03 v2 [1080p...]" (literal E prefix, optional version tag)
-# A bare number needs two digits to be an episode rather than part of the
-# title, but an explicit "E" prefix is unambiguous, so "- E1 v2" counts too.
+# Anime-style absolute numbering, "[Group] Show - 03 [1080p]" (docs/library.md)
 ANIME_EP = re.compile(r"^(?:\[[^\]]*\]\s*)*(?P<show>.+?)\s*-\s*"
                       r"(?:[eE](?P<ep_pfx>\d{1,3})|(?P<ep>\d{2,3}))"
                       r"(?:\s*-\s*\d{2,3})?"
@@ -52,10 +57,8 @@ ANIME_EP_DOT = re.compile(
     r"^(?P<show>.+?)\.(?P<ep>\d{2,3})(?:\.v\d+)?(?=\.(?:2160p|1080p|720p|480p|"
     r"bluray|brrip|bdrip|web-?dl|hdtv|x26[45]|h\.?26[45]|hevc)\b)", re.I)
 ANIME_SEASON = re.compile(r"\b[sS](\d{1,2})\s*$")
-# Season hint from the immediate parent folder ("Attack on Titan Season 2"),
-# used when a batch has one absolute-numbered subfolder per season - the
-# filename alone ("Show - 26.mkv") carries no season, so without this every
-# season collides into "Season 01".
+# Season hint from the parent folder, for absolute-numbered batches that carry
+# no season in the filename at all (docs/library.md)
 FOLDER_SEASON = re.compile(r"\bseason\s*(\d{1,2})\b", re.I)
 # Release-name junk: leading site/group prefixes
 SITE_PFX = re.compile(r"^(?:\[[^\]]*\]|www\.?\S+|[\w-]+\.(?:org|com|net|to|io|me|tv|bz|mx)(?:\s*[-–—]+\s*|\s{2,}))", re.I)
@@ -126,10 +129,7 @@ SHOW_ALIASES = {
     "dcs legends of tomorrow": "DC's Legends of Tomorrow",
     "legends of tomorrow": "DC's Legends of Tomorrow",
 }
-# "<Show> OVA" / "<Show> Specials" is not a series of its own — Emby's
-# convention is season 0 of the parent show, which is also the only way the
-# bonus episodes inherit the parent's artwork and metadata instead of showing
-# up as an unidentifiable extra entry beside it.
+# "<Show> OVA"/"<Show> Specials" is season 0 of the parent (docs/library.md)
 SPECIALS_SUFFIX = re.compile(r"\s*[-–:]?\s*\b(?:ovas?|specials?)\b\s*$", re.I)
 # Kodi/Emby special-features folder names: content nested under one of these
 # is attached to the parent movie instead of showing as its own movie card
@@ -138,6 +138,38 @@ EXTRAS_DIR_NAMES = {"featurettes", "extras", "extra", "behind the scenes",
                     "trailers", "other", "specials"}
 # A short preview clip bundled alongside the real file, not the movie itself
 SAMPLE_PAT = re.compile(r"\bsample\b", re.I)
+# Bracketed format/rip junk trailing a music release name (docs/library.md)
+AUDIO_TAG_BRACKET = re.compile(
+    r"\s*[\[\(\{][^\]\)\}]*\b(?:flac|ape|wv|wavpack|alac|mp3|aac|ogg|opus|wav|"
+    r"dsd|sacd|lossless|lossy|\d{1,2}\s?bits?|\d{2,3}(?:[.,]\d)?\s?khz|"
+    r"\d{3}\s?kbps|eac|cue|log|scans?|vbr|cbr|vinyl|web|cd|reissue|"
+    r"remaster(?:ed)?|mono|stereo)\b[^\]\)\}]*[\]\)\}]", re.I)
+# The same junk unbracketed, at the end: "..._Scans", "... - 24bit 96kHz"
+AUDIO_TAG_TAIL = re.compile(
+    r"[\s_.,-]*\b(?:flac|ape|wv|wavpack|alac|mp3|aac|lossless|scans?|eac|cue|"
+    r"log|vbr|cbr|\d{1,2}\s?bits?|\d{2,3}(?:[.,]\d)?\s?khz|\d{3}\s?kbps|"
+    r"reissue|remaster(?:ed)?|web|vinyl)\b[\s_.,-]*$", re.I)
+YEAR_ANY = re.compile(r"\b((?:19|20)\d{2})\b")
+# A discography's span, "(1988-2012)": one year, not two, and not a title
+YEAR_SPAN = re.compile(r"\(?\b((?:19|20)\d{2})\s*[-–—]\s*(?:19|20)?\d{2,4}\)?")
+BARE_YEAR = re.compile(r"^\(?((?:19|20)\d{2})\)?$")
+# "CD1", "Disc 2", "CD.03" — a disc level Emby keeps inside the album
+DISC_DIR = re.compile(r"^(?:cd|disc|disk)[\s._-]*(\d{1,2})$", re.I)
+# Artwork and rip-log folders that carry no audio worth filing on its own
+MUSIC_JUNK_DIR = {"scans", "scan", "artwork", "art", "covers", "cover",
+                  "booklet", "logs", "log", "info"}
+# A dash with whitespace on one side: splits "Artist - Album", not "Post-Bop"
+DASH_SPLIT = re.compile(r"\s+[-–—]\s*|\s*[-–—]\s+")
+# "2 x CD", "3CD": how the release was pressed, not what it is called
+DISC_COUNT = re.compile(r"[,;]?\s*\b\d{1,2}\s*[x×]?\s*cds?\b\s*", re.I)
+EMPTY_PARENS = re.compile(r"[\(\[\{]\s*[\)\]\}]")
+IMAGE_EXT = {".jpg", ".jpeg", ".png", ".webp"}
+# An album folder's cover, best name first; anything else falls back to size
+COVER_NAMES = ("front", "cover", "folder", "booklet front", "f1", "album")
+BACK_COVER = re.compile(r"\b(back|tray|inlay|inside|disc|cd\d?|obi|spine)\b",
+                        re.I)
+# A cover this big is a full-resolution scan, not artwork Emby should hold
+MAX_COVER_SIZE = 20 * 1024 * 1024
 
 
 def emby_friendly_name(filename):
@@ -185,11 +217,8 @@ def tv_target(item_name, rel_parts):
     """
     fname = rel_parts[-1]
     parent = rel_parts[-2] if len(rel_parts) > 1 else ""
-    # Some groups separate every token with underscores rather than spaces or
-    # dots ("[Cleo]Shinsekai_yori_-_01_(...)"). Underscore is a word char, so
-    # the \s and \b anchors below never fire on those names and the whole
-    # series is misread as a pile of movies. Substituting 1:1 keeps the string
-    # length identical, so every match offset stays valid against `fname`.
+    # Underscore is a word char, so \s and \b never fire on underscore-separated
+    # names; the 1:1 swap keeps every match offset valid (docs/library.md)
     probe = fname.replace("_", " ")
     season = episode = None
     prefix = ""
@@ -247,6 +276,106 @@ def tv_target(item_name, rel_parts):
     return show, season, episode, None, f"{emby_friendly_name(stem)}{ext}", renumber_key
 
 
+def clean_audio_tags(name):
+    """Strip format, bitrate and rip-log junk from a music release name."""
+    # A leading "(Free Jazz, Avant-Garde)" is the tracker's genre list and a
+    # "{Blue Note}" anywhere is the label; neither belongs in a folder name
+    name = re.sub(r"^\s*\([^)]*\)\s*", "", name)
+    name = re.sub(r"\s*\{[^}]*\}\s*", " ", name)
+    for _ in range(4):
+        stripped = AUDIO_TAG_TAIL.sub(
+            "", AUDIO_TAG_BRACKET.sub(" ", name)).strip(STRIP_CHARS + ")]}")
+        if stripped == name:
+            break
+        name = stripped
+    name = DISC_COUNT.sub(" ", name)
+    return re.sub(r"\s{2,}", " ", EMPTY_PARENS.sub(" ", name)).strip(
+        STRIP_CHARS)
+
+
+def split_artist_album(name, default_artist=None):
+    """Split a music release name into (artist, album, year); any may be None."""
+    name = urllib.parse.unquote(name)
+    for _ in range(3):
+        stripped = SITE_PFX.sub("", name).strip()
+        if stripped == name:
+            break
+        name = stripped
+    name = clean_audio_tags(YEAR_SPAN.sub(r"\1", re.sub(r"[_]+", " ", name)))
+    segs = [s.strip(STRIP_CHARS) for s in DASH_SPLIT.split(name)]
+    segs = [s for s in segs if s]
+    if not segs:
+        return default_artist, None, None
+    artist = default_artist
+    if len(segs) > 1 and not BARE_YEAR.match(segs[0]):
+        artist = segs.pop(0)
+        # A trailing parenthetical on the artist is a sideman list, not part
+        # of the name — without this every quartet becomes its own artist
+        artist = re.sub(r"\s*\([^)]*\)\s*$", "", artist).strip() or artist
+    year = None
+    if segs and BARE_YEAR.match(segs[0]):
+        year = int(BARE_YEAR.match(segs.pop(0)).group(1))
+    album = " - ".join(segs).strip(STRIP_CHARS) or None
+    if album and year is None:
+        m = YEAR_ANY.search(album)
+        if m and album[:m.start()].strip(STRIP_CHARS):
+            year = int(m.group(1))
+            album = (album[:m.start()] + " " + album[m.end():]).strip(
+                STRIP_CHARS)
+    if album:
+        album = clean_audio_tags(album) or None
+    return artist or default_artist, album, year
+
+
+def album_dir(album, year):
+    return f"{album} ({year})" if album and year else album
+
+
+def music_target(item_name, rel_parts):
+    """Return (artist_dir, album_dir, disc_dirs) for one audio file, or None."""
+    item_artist, item_album, item_year = split_artist_album(item_name)
+    dirs = [p for p in rel_parts[:-1] if p.lower() not in MUSIC_JUNK_DIR]
+    discs = [p for p in dirs if DISC_DIR.match(p)]
+    named = [p for p in dirs if not DISC_DIR.match(p)]
+    artist, album, year = item_artist, item_album, item_year
+    if named:
+        # A discography box: the deepest named folder is the album, and the
+        # item name is only good for the artist
+        sub_artist, sub_album, sub_year = split_artist_album(
+            named[-1], default_artist=item_artist)
+        if sub_album:
+            artist, album, year = sub_artist, sub_album, sub_year
+    if not artist and not album:
+        return None
+    if not album:
+        album = item_name
+    if not artist:
+        # No "Artist - Album" split in the name; the probe's tags will fix it
+        artist = album
+    disc_dirs = [f"CD {int(DISC_DIR.match(d).group(1)):02d}" for d in discs]
+    return artist, album_dir(album, year), disc_dirs
+
+
+def pick_cover(files):
+    """Pick the front-cover image of a music item, or None."""
+    best = None
+    for f in files:
+        name = (f.get("short_name") or f["name"]).lower()
+        if os.path.splitext(name)[1] not in IMAGE_EXT:
+            continue
+        size = f.get("size") or 0
+        if not 4 * 1024 < size < MAX_COVER_SIZE:
+            continue
+        stem = os.path.basename(name)
+        rank = next((i for i, p in enumerate(COVER_NAMES) if p in stem),
+                    len(COVER_NAMES))
+        if BACK_COVER.search(stem):
+            rank += len(COVER_NAMES)
+        if best is None or (rank, -size) < best[0]:
+            best = ((rank, -size), f)
+    return best[1] if best else None
+
+
 def load_env():
     env = {}
     for line in (BASE / ".env").read_text().splitlines():
@@ -258,10 +387,8 @@ def load_env():
 
 
 def api_get(path, key, attempts=4):
-    # Torbox's edge routinely drops a TLS handshake or answers 403/520 under
-    # load. Retry before giving up: a bare failure here used to propagate as
-    # "this source owns nothing", which the prune below reads as a mandate to
-    # delete every .strm it backs.
+    # A bare failure here reads to the prune as "this source owns nothing", so
+    # the retry is load-bearing, not politeness (docs/library.md)
     req = urllib.request.Request(
         API + path,
         headers={"Authorization": f"Bearer {key}",
@@ -295,7 +422,7 @@ def strm_url(kind, key, item_id, file_id):
 
 
 def collect(kind, key):
-    """Yield (relpath_in_library, strm_url) for every video file of this kind."""
+    """Yield (destination, relpath_in_library, strm_url) per playable file."""
     items = api_get(f"/{kind}/mylist?bypass_cache=true", key)
     for item in items:
         state = (item.get("download_state") or "").lower()
@@ -304,23 +431,18 @@ def collect(kind, key):
             continue
         item_name = sanitize(item.get("name") or f"{kind}-{item['id']}")
         files = item.get("files") or []
-        # The torrent's own top-level folder can disagree with the item's
-        # display "name" (an indexer-formatted title carries a "[Batch]
-        # (Alt Title)" suffix the actual folder never had) - strip whatever
-        # the files themselves share, not what the item claims, or a
-        # mismatch leaves the raw wrapper folder in every file's path below
-        # (harmless for episodes, which tv_target() rebuilds from scratch,
-        # but it leaves bonus/extras files nested under a stray folder that
-        # Emby reads as a phantom extra season).
+        # Strip the wrapper folder the files share, not the one the item's
+        # display name claims — the two disagree (docs/library.md)
         names = [f["name"] for f in files]
         top_level = None
         if names and all("/" in n for n in names):
             segs = {n.split("/", 1)[0] for n in names}
             top_level = segs.pop() if len(segs) == 1 else None
         vids = []
+        auds = []
         for f in files:
             ext = os.path.splitext(f.get("short_name") or f["name"])[1].lower()
-            if ext not in VIDEO_EXT:
+            if ext not in VIDEO_EXT and ext not in AUDIO_EXT:
                 continue
             # path of file relative to the item root folder
             rel = f["name"]
@@ -333,11 +455,38 @@ def collect(kind, key):
                    for p in rel_parts) \
                     or SAMPLE_PAT.search(os.path.splitext(rel_parts[-1])[0]):
                 continue
-            if (f.get("size") or 0) < MIN_VIDEO_SIZE:
+            floor = MIN_VIDEO_SIZE if ext in VIDEO_EXT else MIN_AUDIO_SIZE
+            if (f.get("size") or 0) < floor:
                 # too small to be real content (a broken/placeholder upload,
                 # not even a legitimate short bonus clip)
                 continue
-            vids.append((f, rel_parts))
+            (vids if ext in VIDEO_EXT else auds).append((f, rel_parts))
+
+        # An item with any video is a video release, and its audio files are
+        # the bundled OST rather than an album anyone asked for
+        if not vids and auds:
+            # Lossless first: a rip carrying both formats collapses onto one
+            # path per track once the extension is stripped, and FLAC wins
+            auds.sort(key=lambda fa: os.path.splitext(fa[1][-1])[1].lower()
+                      not in LOSSLESS_EXT)
+            albums = {}
+            for f, rel_parts in auds:
+                tgt = music_target(item_name, rel_parts)
+                if not tgt:
+                    continue
+                artist, album, disc_dirs = tgt
+                parts = [sanitize(artist), sanitize(album),
+                         *(sanitize(d) for d in disc_dirs)]
+                albums.setdefault(tuple(parts[:2]), None)
+                yield ("music",
+                       [*parts, os.path.splitext(rel_parts[-1])[0] + ".strm"],
+                       strm_url(kind, key, item["id"], f["id"]))
+            cover = pick_cover(files)
+            for album_parts in albums:
+                if cover:
+                    yield ("cover", [*album_parts, "folder.jpg"],
+                           strm_url(kind, key, item["id"], cover["id"]))
+            continue
 
         # Classify every file up front so the movie branch can see the whole
         # batch instead of deciding file-by-file: a season pack's leftover
@@ -345,10 +494,8 @@ def collect(kind, key):
         classified = [(f, rel_parts, tv_target(item_name, rel_parts))
                       for f, rel_parts in vids]
 
-        # A season-per-folder batch with absolute numbering ("Show Season 2/
-        # Show - 26.mkv") gets its season from the folder but its episode is
-        # still the whole-series absolute count; reset it to a 1-based
-        # in-season sequence now that every file's episode number is known.
+        # Absolute episode numbers borrowed from a season folder, reset to a
+        # 1-based in-season sequence now the whole item is known
         renumber_groups = {}
         for i, (_, _, tgt) in enumerate(classified):
             if tgt and tgt[5]:
@@ -366,15 +513,8 @@ def collect(kind, key):
 
         non_tv = [(f, rel_parts) for f, rel_parts, tgt in classified
                   if not tgt and not TV_PAT.search(f["name"])]
-        # A bonus clip can legitimately run to a few hundred MB (a lossless
-        # anime clean-ED, a making-of documentary), but nothing observed in
-        # this library's actual bonus content comes close to a feature's
-        # size — so "feature-length" is a much more reliable "this is a real
-        # movie" signal than the file's own name. Every file clearing that
-        # bar counts, not just the single largest: a franchise batch (e.g.
-        # four recap movies with no year in any of their names) bundles
-        # several real movies of similar size, and picking only the biggest
-        # dropped the rest as if they were bonus clips.
+        # Size, not the name, says which files are real movies — and every
+        # file clearing the bar counts, not just the biggest (docs/library.md)
         release_ids = set()
         main_titles = {}
         for f, rel_parts in non_tv:
@@ -397,12 +537,8 @@ def collect(kind, key):
                 is_tv = TV_PAT.search(f["name"]) is not None
                 if is_tv:
                     show_dir = clean_show(item_name) or item_name
-                    # A bonus clip with no episode number of its own (an
-                    # NCOP/NCED, a "Finale" special) still sits inside a
-                    # "<Show> Season N" folder in a season-per-folder batch;
-                    # fold it into the same normalized Season NN the real
-                    # episodes land in instead of keeping the raw folder
-                    # name, which Emby reads as a phantom extra season.
+                    # An NCOP/NCED with no episode number still sits in a
+                    # season folder; a raw one reads as a phantom season
                     season_dir = None
                     for p in rel_parts[:-1]:
                         fs = FOLDER_SEASON.search(p)
@@ -448,17 +584,14 @@ def collect(kind, key):
                             movie_dir = alt
                     movie_dir = TITLE_OVERRIDES.get(
                         (movie_dir or "").lower(), movie_dir)
-                    # Always flatten to movie_dir/file or movie_dir/Featurettes/
-                    # file: any preserved release-subfolder name (a site
-                    # prefix, a shared collection wrapper, an uploader tag)
-                    # risks Emby reading it as the title instead of movie_dir,
-                    # and it leaves bonus clips orphaned with no sibling movie
-                    # file whenever a *different* release wins the dedup below.
+                    # Flatten: a kept release subfolder becomes Emby's title
+                    # and orphans bonus clips (docs/library.md)
                     rel_parts = [rel_parts[-1]] if is_release \
                         else ["Featurettes", rel_parts[-1]]
                     parts = [sanitize(movie_dir), *rel_parts]
             parts[-1] += ".strm"
-            yield (is_tv, parts, strm_url(kind, key, item["id"], f["id"]))
+            yield ("tv" if is_tv else "movies", parts,
+                   strm_url(kind, key, item["id"], f["id"]))
 
 
 def main():
@@ -466,11 +599,18 @@ def main():
     wanted = {}  # Path -> url
     skipped = 0
     failed = []
+    covers = {}  # Path -> url of a folder.jpg to download
+    roots = {"tv": LIB_TV, "movies": LIB_MOVIES, "music": LIB_MUSIC,
+             "cover": LIB_MUSIC}
+    for root in LIB_ROOTS:
+        root.mkdir(parents=True, exist_ok=True)
     for kind in ("torrents", "usenet", "webdl"):
         try:
-            for is_tv, parts, url in collect(kind, key):
-                root = LIB_TV if is_tv else LIB_MOVIES
-                path = root.joinpath(*parts)
+            for dest, parts, url in collect(kind, key):
+                path = roots[dest].joinpath(*parts)
+                if dest == "cover":
+                    covers.setdefault(path, url)
+                    continue
                 if path in wanted and wanted[path] != url:
                     skipped += 1  # duplicate source for the same file; first wins
                     continue
@@ -599,13 +739,31 @@ def main():
             updated += 1
             path.write_text(url)
 
+    # Album art, once per album: a music .strm carries no tags Emby can read,
+    # so folder.jpg is the only cover an album folder will ever get.
+    art = 0
+    for path, url in covers.items():
+        if path.exists() or not path.parent.is_dir() \
+                or not any(path.parent.glob("*.strm")):
+            continue
+        try:
+            req = urllib.request.Request(
+                url, headers={"User-Agent": "debrid-emby-stack/1.0"})
+            with urllib.request.urlopen(req, timeout=120) as r:
+                data = r.read(MAX_COVER_SIZE)
+            if data[:3] in (b"\xff\xd8\xff", b"\x89PN", b"RIF"):
+                path.write_bytes(data)
+                art += 1
+        except Exception as e:
+            print(f"[warn] cover {path.parent.name}: {e}", file=sys.stderr)
+
     # Pruning is only safe when `wanted` is a complete picture of the account.
     # A source that errored contributes nothing, so every .strm it backs would
     # look stale — one dropped TLS handshake once deleted 1137 files this way.
-    stale = [p for root in (LIB_TV, LIB_MOVIES)
+    stale = [p for root in LIB_ROOTS
              for p in sorted(root.rglob("*.strm"), reverse=True)
              if p not in wanted]
-    existing = sum(1 for root in (LIB_TV, LIB_MOVIES)
+    existing = sum(1 for root in LIB_ROOTS
                    for _ in root.rglob("*.strm"))
     if failed:
         prune_block = f"{','.join(failed)} failed to list"
@@ -626,8 +784,12 @@ def main():
         for p in stale:
             p.unlink()
             removed += 1
+        # A cover outlives its album's last .strm and keeps the dir alive
+        for p in LIB_MUSIC.rglob("folder.jpg"):
+            if not any(p.parent.glob("*.strm")):
+                p.unlink()
         # prune empty dirs bottom-up
-        for root in (LIB_TV, LIB_MOVIES):
+        for root in LIB_ROOTS:
             for d in sorted((d for d in root.rglob("*") if d.is_dir()),
                             key=lambda d: len(d.parts), reverse=True):
                 try:
@@ -637,7 +799,7 @@ def main():
 
     print(f"strm sync: {len(wanted)} wanted, {created} created, "
           f"{updated} updated, {removed} removed, {skipped} dup-skipped, "
-          f"{deduped} lower-quality dupes dropped")
+          f"{deduped} lower-quality dupes dropped, {art} covers fetched")
 
 
 if __name__ == "__main__":

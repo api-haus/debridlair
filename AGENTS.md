@@ -140,6 +140,45 @@ If metadata didn't match (year None, wrong title), force it:
 UI use Identify. Item GET by id is `/emby/Users/{uid}/Items/{id}`, not
 `/emby/Items/{id}`.
 
+## Add an album
+
+Music goes through the same script with `--music`, and lands in
+`library/music/<Artist>/<Album (Year)>/` as `.strm` files Emby streams from
+Torbox exactly like a film:
+
+```bash
+python3 scripts/torbox_find.py "David S. Ware Third Ear Recitation" --music
+python3 scripts/torbox_find.py "Shibusashirazu Orchestra" --music --list
+python3 scripts/torbox_find.py "Album" --music --allow-lossy   # MP3 is fine
+```
+
+`--music` searches the audio categories and **refuses a lossy release by
+default** — the Prowlarr category and the release name both say which it is.
+It also ranks a `tracks+.cue` rip above an `image+.cue` one, because Emby does
+not read `.cue`: a single-file image plays as one long track rather than a
+track list. Ceilings are `ALBUM_MAX` (5 GB) and `DISCOG_MAX` (60 GB) for a
+name that says discography, anthology, complete or box set.
+
+A whole discography is one search per album, not one search for the artist —
+box torrents are rare for jazz, and per-album releases carry better tags and
+seed better. Search the artist with `--list` first, then queue what is there.
+
+Fast-track it in the same way as a film, then check it landed:
+
+```bash
+python3 scripts/torbox_sync.py
+curl -s -X POST "http://localhost:8096/emby/Library/Refresh?api_key=$(cat sync-state/emby_api_key)"
+python3 scripts/emby_probe.py --limit 50
+```
+
+**Emby files music `.strm` as folders, not albums.** The Artist → Album →
+tracks tree browses and plays, but there are no album cards, no artist pages
+and no tags, because Emby's album resolver does not accept `.strm`. The sync
+fetches each release's front cover as `folder.jpg` so an album at least has
+art. Do not try to fix this with symlinks into `rclone/mnt` — that namespace
+is flat, so two albums' `01 - Intro.flac` are the same path. Full detail, and
+everything else the sync decides, is in `docs/library.md`.
+
 ## When the release has no subtitles
 
 Requeuing a compliant release is the first answer, and for a title with several

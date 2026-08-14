@@ -233,6 +233,7 @@ def main():
 
     add_library(token, "TV Shows", "tvshows", ["/media/library/tv"])
     add_library(token, "Movies", "movies", ["/media/library/movies"])
+    add_library(token, "Music", "music", ["/media/library/music"])
     add_library(token, "Torbox (raw)", "mixed", ["/media/torbox"])
 
     enable_intro_detection(token)

@@ -54,7 +54,7 @@ def main():
     api_key = (BASE / "sync-state" / "emby_api_key").read_text().strip()
     user_id = req("GET", "/Users", api_key)[0]["Id"]
 
-    q = ("Recursive=true&IncludeItemTypes=Episode,Movie&Limit=10000"
+    q = ("Recursive=true&IncludeItemTypes=Episode,Movie,Audio&Limit=10000"
          "&Fields=MediaStreams,Path,SeriesName")
     items = req("GET", f"/Items?{q}", api_key)["Items"]
     todo = [i for i in items if not i.get("MediaStreams")]
