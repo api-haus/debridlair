@@ -140,6 +140,36 @@ If metadata didn't match (year None, wrong title), force it:
 UI use Identify. Item GET by id is `/emby/Users/{uid}/Items/{id}`, not
 `/emby/Items/{id}`.
 
+## When the release has no subtitles
+
+Requeuing a compliant release is the first answer, and for a title with several
+releases it is the right one. Old, small or foreign-language titles often have
+no compliant release at all — every indexed copy is a YTS encode that ships its
+subtitles as sidecar files the torrent never included, or a DVDRip from before
+anybody muxed them. `scripts/emby_subs.py` asks Emby's own providers for the
+missing language and writes the sidecar next to the `.strm`:
+
+```bash
+python3 scripts/emby_subs.py --dry-run                 # what it would fetch
+python3 scripts/emby_subs.py --id 26699                # one item, by Emby id
+python3 scripts/emby_subs.py --title "Green Fish"      # substring of the name
+```
+
+`--title` matches a substring, so "Time" also selects every *Adventure Time*
+episode; prefer `--id` whenever the set is known. An item with no MediaStreams
+at all is unprobed rather than subtitle-less — the tool skips those and says
+so, and `emby_probe.py` is what fixes them.
+
+It refuses a candidate whose name does not carry the item's title, because
+shared words alone once matched a concert film to *Saturday Night Live*, and a
+confidently wrong subtitle track is worse than none. A CD-split subtitle is
+refused for the same reason: it covers half a runtime and desyncs the rest.
+
+The sidecar is safe in `library/`, which is otherwise generated: `torbox_sync.py`
+only ever prunes `*.strm`, and removes a directory only once it is empty. This
+is the one thing that writes there without going through the sync, and it is
+Emby doing the writing.
+
 ## Keeping an airing show topped up
 
 `sync-state/watchlist.txt` lists shows to follow, one per line as
@@ -329,7 +359,7 @@ tidy up, because that is the resume point. Full detail in `docs/dubbing.md`.
 - `docker-compose.yml` — emby, torbox-mount (rclone WebDAV FUSE),
   torbox-sync (15-min loop), prowlarr
 - `scripts/` — torbox_sync.py, torbox_find.py, torbox_add.py, emby_setup.py,
-  emby_probe.py
+  emby_probe.py, emby_subs.py
 - `sync-state/emby_api_key` — Emby API key
 - Skip-intro pipeline: StrmAssistant fingerprint task daily 03:47, native
   Detect Episode Intros 05:33. New episodes get markers within ~a day.
