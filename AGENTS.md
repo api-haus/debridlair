@@ -194,7 +194,7 @@ python3 scripts/emby_probe.py --limit 50
 tracks tree browses and plays, but there are no album cards, no artist pages
 and no tags, because Emby's album resolver does not accept `.strm`. The sync
 fetches each release's front cover as `folder.jpg` so an album at least has
-art. Do not try to fix this with symlinks into `rclone/mnt` — that namespace
+art. Do not try to fix this with symlinks into `/mnt/torbox` — that namespace
 is flat, so two albums' `01 - Intro.flac` are the same path. Full detail, and
 everything else the sync decides, is in `docs/library.md`.
 
@@ -418,10 +418,15 @@ tidy up, because that is the resume point. Full detail in `docs/dubbing.md`.
   queue is the only thing preventing that, so never bypass it, and never
   raise the pool to make something start sooner.
 - **Prefer `docker compose stop` over `down`.** `down` removes the rclone
-  container without unmounting, leaving a dead FUSE endpoint at `rclone/mnt`
+  container without unmounting, leaving a dead FUSE endpoint at `/mnt/torbox`
   that makes the next `up` fail with `transport endpoint is not connected` —
-  and clearing it needs root (`sudo umount -l rclone/mnt`). If you must
+  and clearing it needs root (`sudo umount -l /mnt/torbox`). If you must
   `down`, unmount first.
+- **The WebDAV mount lives at `/mnt/torbox`, outside this directory.** Under it,
+  every disk-usage tool that walks the tree charged the whole Torbox account
+  (3.75 TiB) against this box's drive. `--vfs-disk-space-total-size 1G` caps
+  what it claims in `df` for the same reason: WebDAV reports no quota, so
+  rclone advertises 1 PB free and space-aware tools believe it.
 - Only acquire content through `torbox_find.py` — it enforces the
   streamability limits that match the 40 Mbit cap, and the language policy, at
   acquisition time (the ceilings themselves are `EP_MAX`/`MOVIE_MAX`/`PACK_MAX`

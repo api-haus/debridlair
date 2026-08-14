@@ -37,8 +37,12 @@ services:
       --low-level-retries 10
       --umask 022
       --log-level INFO
+      --vfs-disk-space-total-size 1G
+    # WebDAV reports no quota, so without the size above rclone claims 1 PB free.
     volumes:
-      - ./rclone/mnt:/mnt/torbox:rshared
+      # Outside the project tree on purpose: a mount under it makes every disk
+      # usage tool count the whole Torbox account against this box's drive.
+      - /mnt/torbox:/mnt/torbox:rshared
       - ./rclone/cache:/cache
     healthcheck:
       test: ["CMD-SHELL", "ls /mnt/torbox >/dev/null 2>&1"]
@@ -170,7 +174,7 @@ services:
       - ./library:/media/library
       - ./dub/finished:/media/dub
       - type: bind
-        source: ./rclone/mnt
+        source: /mnt/torbox
         target: /media/torbox
         read_only: true
         bind:
