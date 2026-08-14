@@ -123,17 +123,48 @@ reading `back`/`tray`/`disc`, and falls back to the largest image under
 `MAX_COVER_SIZE`. The prune deletes a `folder.jpg` once the album's last
 `.strm` has gone, or the empty album directory would never be removed.
 
-### A CUE image is one long track
+### A CUE image becomes tracks through `cueslice`
 
 A rip stored as one FLAC plus a `.cue` sheet — common for pre-2010 jazz
-uploads — has no per-track files to write. It lands as a single `.strm` and
-Emby plays the whole album as one item: measured at 59:11 and 821 kbit/s for
-*Third Ear Recitation*, direct play, well inside the 40 Mbit cap. Emby does not
-read `.cue`, so the track list is not there.
+uploads — has no per-track files to write, and Emby has no CUE support at all:
+there is not one `cuesheet` string in any of its DLLs. Left alone, such an
+album is a single item of album length.
 
-`torbox_find.py --music` ranks a release whose name says `tracks+.cue` above
-one that says `image+.cue` for this reason. Where only an image rip exists,
-it plays; it is one item instead of eight.
+`scripts/cueslice.py` is a small service in the compose stack that answers a
+request for one track by running ffmpeg against the remote file and returning
+only that track's audio. `torbox_sync.py` fetches the sheet, and writes one
+`.strm` per track pointing at it:
+
+```
+01 - Autumn Leaves.strm -> http://cueslice:8099/slice?u=<source>&ss=0&t=223.0
+```
+
+Nothing is downloaded, nothing is split, and the source file is never
+touched. The sheet also states PERFORMER, TITLE and DATE, which for a
+single-file rip is the only place the artist and album are written down —
+`music_target()` prefers them over anything parsed from the torrent name.
+
+**It answers in PCM, wrapped as WAV, at the source's own rate and depth.** No
+sample is re-encoded. PCM is the point: its length in bytes follows from its
+length in seconds, so the service can send an exact `Content-Length` and
+honour byte ranges. A piped FLAC could do neither, and Emby would show a track
+of unknown duration that cannot be scrubbed.
+
+Measured on *Third Ear Recitation* (59:11, nine tracks): every track's
+duration in Emby matches its span in the sheet, a slice is byte-identical to
+decoding the source at the same offset, and Emby direct-streams it. Throughput
+is 126–174 Mbit/s against the 1.41 Mbit/s playback needs. The cost is the
+initial seek — 1.3 s into track 1, 11.9 s into track 9, which sits 50 minutes
+into the file — because ffmpeg has to seek that far through a remote FLAC
+before the first sample comes out.
+
+Emby proxies the stream rather than handing the URL to the client
+(`DirectStreamUrl` points back at Emby), so the service needs no published
+port and is reached by its service name on the compose network.
+
+`torbox_find.py --music` still ranks a release whose name says `tracks+.cue`
+above one that says `image+.cue`. A real per-track rip needs no service at
+all, and it carries its own tags.
 
 ## Guards
 

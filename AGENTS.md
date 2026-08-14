@@ -198,6 +198,15 @@ art. Do not try to fix this with symlinks into `rclone/mnt` — that namespace
 is flat, so two albums' `01 - Intro.flac` are the same path. Full detail, and
 everything else the sync decides, is in `docs/library.md`.
 
+**A single-file CUE rip still becomes tracks.** Emby has no CUE support of any
+kind, so the `cueslice` service cuts one track out of the remote file with
+ffmpeg as it streams, and the sync writes one `.strm` per track pointing at
+it. Nothing is downloaded and the source is never split. It answers in PCM so
+the length is exact and seeking works; the first sample of a track deep in a
+long file costs about ten seconds of seeking. If an album shows up as one
+hour-long item, check `docker compose ps cueslice` and that the sheet parsed —
+sheets are cached in `sync-state/cue_sheets.json`.
+
 ## When the release has no subtitles
 
 Requeuing a compliant release is the first answer, and for a title with several
@@ -442,7 +451,7 @@ tidy up, because that is the resume point. Full detail in `docs/dubbing.md`.
 ## Stack layout
 
 - `docker-compose.yml` — emby, torbox-mount (rclone WebDAV FUSE),
-  torbox-sync (15-min loop), prowlarr, flaresolverr
+  torbox-sync (15-min loop), prowlarr, flaresolverr, cueslice
 - `scripts/` — torbox_sync.py, torbox_find.py, torbox_disco.py, torbox_add.py,
   emby_setup.py, emby_probe.py, emby_subs.py
 - `sync-state/emby_api_key` — Emby API key

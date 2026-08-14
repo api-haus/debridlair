@@ -129,6 +129,7 @@ For the curious. You do not need any of this to use the thing.
 | `torbox-sync` | Every 15 min: turn your debrid downloads into a normalized `.strm` library, refresh Emby, probe new items |
 | `prowlarr` | Indexer aggregation, so search is one query instead of six |
 | `emby-throttle` | A `tc` cap on the shared bridge — one budget for every container, not one each |
+| `cueslice` | Cuts one track out of a single-file CUE album as it streams, since Emby cannot read a `.cue` |
 
 The scripts under `scripts/` are the agent's hands: `torbox_find.py` searches
 and ranks releases, `torbox_add.py` queues a magnet directly, `torbox_sync.py`

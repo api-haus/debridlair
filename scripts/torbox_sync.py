@@ -4,6 +4,7 @@
 Reads credentials from ../.env (TORBOX_API_KEY). Idempotent: creates/updates
 .strm files under library/tv and library/movies, removes stale ones.
 """
+import base64
 import json
 import os
 import re
@@ -13,12 +14,19 @@ import urllib.request
 import urllib.parse
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import cue  # noqa: E402
+
 BASE = Path(__file__).resolve().parent.parent
 LIB_TV = BASE / "library" / "tv"
 LIB_MOVIES = BASE / "library" / "movies"
 LIB_MUSIC = BASE / "library" / "music"
 LIB_ROOTS = (LIB_TV, LIB_MOVIES, LIB_MUSIC)
 API = "https://api.torbox.app/v1/api"
+# The cueslice service cuts one track out of a single-file rip (docs/library.md)
+CUESLICE = os.environ.get("CUESLICE_URL", "http://cueslice:8099")
+CUE_CACHE = BASE / "sync-state" / "cue_sheets.json"
+MAX_CUE_SIZE = 512 * 1024
 # Guards against a partial API result being mistaken for a mass delete: refuse
 # to prune more than this share of an already-populated library unprompted.
 MAX_PRUNE_FRACTION = 0.25
@@ -369,9 +377,15 @@ def album_dir(album, year):
     return f"{album} ({year})" if album and year else album
 
 
-def music_target(item_name, rel_parts):
+def music_target(item_name, rel_parts, sheet=None):
     """Return (artist_dir, album_dir, disc_dirs) for one audio file, or None."""
     item_artist, item_album, item_year = split_artist_album(item_name)
+    if sheet:
+        # A sheet states the artist and album outright, which a torrent name
+        # only implies — and for a single-file rip it is the one place they are
+        item_artist = sheet.get("performer") or item_artist
+        item_album = sheet.get("title") or item_album
+        item_year = sheet.get("date") or item_year
     dirs = [p for p in rel_parts[:-1] if p.lower() not in MUSIC_JUNK_DIR]
     discs = [p for p in dirs if DISC_DIR.match(p)]
     named = [p for p in dirs if not DISC_DIR.match(p)]
@@ -392,6 +406,73 @@ def music_target(item_name, rel_parts):
         artist = album
     disc_dirs = [f"CD {int(DISC_DIR.match(d).group(1)):02d}" for d in discs]
     return artist, album_dir(album, year), disc_dirs
+
+
+def load_cue(kind, key, item_id, cue_file):
+    """Fetch and parse one CUE sheet, remembering it across runs."""
+    ident = f"{kind}:{item_id}:{cue_file['id']}"
+    try:
+        cache = json.loads(CUE_CACHE.read_text())
+    except Exception:
+        cache = {}
+    if ident in cache:
+        return cache[ident]
+    if (cue_file.get("size") or 0) > MAX_CUE_SIZE:
+        return None
+    try:
+        req = urllib.request.Request(
+            strm_url(kind, key, item_id, cue_file["id"]),
+            headers={"User-Agent": "debrid-emby-stack/1.0"})
+        with urllib.request.urlopen(req, timeout=60) as r:
+            sheet = cue.parse(cue.decode(r.read(MAX_CUE_SIZE)))
+    except Exception as e:
+        print(f"[warn] cue {cue_file['name']}: {e}", file=sys.stderr)
+        return None
+    cache[ident] = sheet
+    try:
+        CUE_CACHE.parent.mkdir(parents=True, exist_ok=True)
+        CUE_CACHE.write_text(json.dumps(cache))
+    except Exception as e:
+        print(f"[warn] cannot cache cue: {e}", file=sys.stderr)
+    return sheet
+
+
+def match_sheets(kind, key, item_id, files, auds):
+    """Map an audio file's id to the CUE sheet that cuts it into tracks."""
+    sheets = {}
+    cues = [f for f in files
+            if os.path.splitext(f.get("short_name") or f["name"])[1].lower()
+            == ".cue"]
+    if not cues:
+        return sheets
+    parsed = [(c, load_cue(kind, key, item_id, c)) for c in cues]
+    parsed = [(c, s) for c, s in parsed if s and cue.is_image(s)]
+    for f, rel_parts in auds:
+        stem = os.path.splitext(rel_parts[-1])[0].lower()
+        for c, sheet in parsed:
+            named = os.path.splitext(sheet["files"][0]["name"] or "")[0].lower()
+            cue_stem = os.path.splitext(
+                os.path.basename(c["name"]))[0].lower()
+            # A sheet often names a .wav the rip never shipped, so one sheet
+            # beside one audio file is a match whatever either is called
+            if named == stem or cue_stem == stem \
+                    or (len(parsed) == 1 and len(auds) == 1):
+                sheets[f["id"]] = sheet
+                break
+    return sheets
+
+
+def cue_strms(sheet, source_url):
+    """Yield (filename, slice url) for every track a CUE sheet marks out."""
+    tracks = sheet["files"][0]["tracks"]
+    packed = base64.urlsafe_b64encode(source_url.encode()).decode()
+    for track, start, length in cue.spans(tracks):
+        title = sanitize(track["title"] or f"Track {track['num']:02d}")
+        q = {"u": packed, "ss": f"{start:.6f}"}
+        if length is not None:
+            q["t"] = f"{length:.6f}"     # the last track runs to the end
+        yield (f"{track['num']:02d} - {title}.strm",
+               f"{CUESLICE}/slice?" + urllib.parse.urlencode(q))
 
 
 def pick_cover(files):
@@ -507,18 +588,25 @@ def collect(kind, key):
             # path per track once the extension is stripped, and FLAC wins
             auds.sort(key=lambda fa: os.path.splitext(fa[1][-1])[1].lower()
                       not in LOSSLESS_EXT)
+            sheets = match_sheets(kind, key, item["id"], files, auds)
             albums = {}
             for f, rel_parts in auds:
-                tgt = music_target(item_name, rel_parts)
+                sheet = sheets.get(f["id"])
+                tgt = music_target(item_name, rel_parts, sheet)
                 if not tgt:
                     continue
                 artist, album, disc_dirs = tgt
                 parts = [sanitize(artist), sanitize(album),
                          *(sanitize(d) for d in disc_dirs)]
                 albums.setdefault(tuple(parts[:2]), None)
+                src = strm_url(kind, key, item["id"], f["id"])
+                if sheet:
+                    for fname, slice_url in cue_strms(sheet, src):
+                        yield ("music", [*parts, fname], slice_url)
+                    continue
                 yield ("music",
                        [*parts, os.path.splitext(rel_parts[-1])[0] + ".strm"],
-                       strm_url(kind, key, item["id"], f["id"]))
+                       src)
             cover = pick_cover(files)
             for album_parts in albums:
                 if cover:

@@ -70,12 +70,36 @@ services:
       - ./scripts:/scripts:ro
       - ./library:/library
       - ./.env:/.env:ro
-      - ./sync-state:/sync-state:ro
+      # Writable: the album queue drains here, and cue sheets are cached here
+      - ./sync-state:/sync-state
       # read-only: only for the <ApiKey> in config.xml
       - ./prowlarr:/prowlarr:ro
     depends_on:
       - emby
       - prowlarr
+
+  cueslice:
+    image: python:3.12-alpine
+    container_name: cueslice
+    restart: unless-stopped
+    # One track out of a single-file CUE rip, cut as it streams. Emby has no
+    # CUE support, so without this such an album is one item of album length.
+    command: >
+      sh -c "apk add --no-cache ffmpeg >/dev/null &&
+             exec python3 /scripts/cueslice.py"
+    environment:
+      PORT: "8099"
+    volumes:
+      - ./scripts:/scripts:ro
+      - ./sync-state:/sync-state
+    expose:
+      - "8099"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -T 3 -O /dev/null http://localhost:8099/healthz || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
 
   prowlarr:
     image: linuxserver/prowlarr:latest
