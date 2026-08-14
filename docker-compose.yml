@@ -89,6 +89,19 @@ services:
     volumes:
       - ./prowlarr:/config
 
+  flaresolverr:
+    image: ghcr.io/flaresolverr/flaresolverr:latest
+    container_name: flaresolverr
+    restart: unless-stopped
+    environment:
+      LOG_LEVEL: info
+      TZ: Europe/Kiev
+    # Headless Chrome that answers the Cloudflare challenge RuTracker (and
+    # 1337x, EZTV) serve instead of a login form. Prowlarr reaches it by
+    # service name; it needs no published port.
+    expose:
+      - "8191"
+
   emby-throttle:
     image: alpine:3.20
     container_name: emby-throttle

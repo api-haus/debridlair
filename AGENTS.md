@@ -53,8 +53,8 @@ this and ask only for what you cannot know.
 7. **Prowlarr indexers.** Not scriptable: the indexer list lives in
    `prowlarr/prowlarr.db`, which is not committed. Walk the user through adding
    Knaben, The Pirate Bay, LimeTorrents and Nyaa.si at `:9696`, or
-   `torbox_find.py` returns nothing. (1337x and EZTV are Cloudflare-walled and
-   need a FlareSolverr sidecar.)
+   `torbox_find.py` returns nothing. RuTracker, 1337x and EZTV sit behind a
+   Cloudflare challenge and need the `flaresolverr` service — see below.
 8. **Emby playback defaults.** `PlayDefaultAudioTrack=false` and always-on
    subtitles on the Emby user, matching whatever `PREFS.md` ends up saying. The
    acquisition side is enforced by `torbox_find.py`; this is the playback half
@@ -169,6 +169,33 @@ The sidecar is safe in `library/`, which is otherwise generated: `torbox_sync.py
 only ever prunes `*.strm`, and removes a directory only once it is empty. This
 is the one thing that writes there without going through the sync, and it is
 Emby doing the writing.
+
+## Indexers behind a Cloudflare challenge
+
+The four public trackers answer plain HTTP. RuTracker, 1337x and EZTV serve a
+Cloudflare challenge instead of a login form — a bare request gets `403` with
+`cf-mitigated: challenge` in the headers, which looks exactly like a rejected
+password and is not one. Check the header before blaming credentials.
+
+The `flaresolverr` service is a headless Chrome that answers the challenge. It
+publishes no port; Prowlarr reaches it at `http://flaresolverr:8191/`. Wiring a
+walled indexer takes three steps against the Prowlarr API, in order: create a
+tag, add a `FlareSolverr` indexer proxy carrying that tag, then add the indexer
+with the same tag. An indexer added without the tag fails validation on the
+challenge and is never created.
+
+A private tracker also needs the user's own account. Ask for it; never invent
+one, and keep it out of the repo — Prowlarr stores it in `prowlarr/prowlarr.db`,
+which is gitignored for exactly this reason.
+
+**RuTracker changes what the auto-pick can hand you.** Most of its catalogue is
+Russian-dubbed, and `torbox_find.py` does not read the dub tags, so an
+`MVO`/`DVO`/`VO`-only release can win on seeders alone and violate `PREFS.md`.
+Read the release name: `Original`, `Original Kor` or `+ Original` keeps the
+Korean track and is fine, a bare `RUS` is dub-only and is not. Its titles are
+Russian-first, so search the Russian name (or the director's, as `Ким Ки Дук`)
+when an English query comes back empty — a film absent under one is often
+present under the other.
 
 ## Keeping an airing show topped up
 
@@ -357,7 +384,7 @@ tidy up, because that is the resume point. Full detail in `docs/dubbing.md`.
 ## Stack layout
 
 - `docker-compose.yml` — emby, torbox-mount (rclone WebDAV FUSE),
-  torbox-sync (15-min loop), prowlarr
+  torbox-sync (15-min loop), prowlarr, flaresolverr
 - `scripts/` — torbox_sync.py, torbox_find.py, torbox_add.py, emby_setup.py,
   emby_probe.py, emby_subs.py
 - `sync-state/emby_api_key` — Emby API key
