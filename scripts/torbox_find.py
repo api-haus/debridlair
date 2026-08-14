@@ -104,6 +104,11 @@ LOSSY_PAT = re.compile(
 CUE_IMAGE = re.compile(r"\bimage\s*\+\s*\.?cue|\bimage\b(?![^\[\(]*tracks)|"
                        r"\bone\s*file\b", re.I)
 CUE_TRACKS = re.compile(r"\btracks?\s*\+\s*\.?cue|\btracks\b", re.I)
+# A concert film filed under Audio: it is a video, and it is not an album
+VIDEO_RELEASE = re.compile(
+    r"\b(satrip|dvdrip|bdrip|hdtv|web-?dl|x26[45]|h\.?26[45]|1080[pi]|720p|"
+    r"2160p|dvd[59]|blu-?ray|mkv|avi|vob|iso|cam-?rip|tv-?rip|vhs-?rip|"
+    r"divx|xvid)\b", re.I)
 
 
 def dub_only(title):
@@ -143,6 +148,8 @@ def over_limit(r, music=False, allow_lossy=False):
         return "size"
     if music:
         # "dub" is a genre here and "remux" means nothing, so neither applies
+        if VIDEO_RELEASE.search(title):
+            return "video"
         if not allow_lossy and lossless(r) is False:
             return "lossy"
         return None

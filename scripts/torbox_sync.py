@@ -153,6 +153,10 @@ YEAR_ANY = re.compile(r"\b((?:19|20)\d{2})\b")
 # A discography's span, "(1988-2012)": one year, not two, and not a title
 YEAR_SPAN = re.compile(r"\(?\b((?:19|20)\d{2})\s*[-–—]\s*(?:19|20)?\d{2,4}\)?")
 BARE_YEAR = re.compile(r"^\(?((?:19|20)\d{2})\)?$")
+REISSUE_YEAR = re.compile(r"[\(\[]\s*(?:19|20)\d{2}\s*[\)\]]?")
+TRAILING_YEAR = re.compile(r"[\s,;.\-–—]*\b(?:19|20)\d{2}\s*$")
+# A concert's full date, "1999.12.03": the year is the year, the rest is not
+DATE_STAMP = re.compile(r"\b((?:19|20)\d{2})[.\-/](\d{1,2})[.\-/](\d{1,2})\b")
 # "CD1", "Disc 2", "CD.03" — a disc level Emby keeps inside the album
 DISC_DIR = re.compile(r"^(?:cd|disc|disk)[\s._-]*(\d{1,2})$", re.I)
 # Artwork and rip-log folders that carry no audio worth filing on its own
@@ -160,6 +164,13 @@ MUSIC_JUNK_DIR = {"scans", "scan", "artwork", "art", "covers", "cover",
                   "booklet", "logs", "log", "info"}
 # A dash with whitespace on one side: splits "Artist - Album", not "Post-Bop"
 DASH_SPLIT = re.compile(r"\s+[-–—]\s*|\s*[-–—]\s+")
+# Everything from the first format token on is rip notes, not a title. A
+# bracket cannot be trusted to close them: "Monism , FLAC (tracks" is real.
+AUDIO_CUT = re.compile(
+    r"[\s,;(\[{]+(?:flac|ape|wv|wavpack|alac|mp3|aac|ogg|opus|wav|dsd|dsf|"
+    r"sacd|lossless|lossy|tracks?\s*\+|image\s*\+|image\b|eac|cue|scans?|"
+    r"vbr|cbr|\d{3}\s?kbps|\d{1,2}\s?bits?|\d{2,3}(?:[.,]\d)?\s?khz|"
+    r"web-?dl|satrip|dvdrip|bdrip|hdtv|x26[45])\b", re.I)
 # "2 x CD", "3CD": how the release was pressed, not what it is called
 DISC_COUNT = re.compile(r"[,;]?\s*\b\d{1,2}\s*[x×]?\s*cds?\b\s*", re.I)
 EMPTY_PARENS = re.compile(r"[\(\[\{]\s*[\)\]\}]")
@@ -281,16 +292,24 @@ def clean_audio_tags(name):
     # A leading "(Free Jazz, Avant-Garde)" is the tracker's genre list and a
     # "{Blue Note}" anywhere is the label; neither belongs in a folder name
     name = re.sub(r"^\s*\([^)]*\)\s*", "", name)
+    # "{Blue Note}" and a trailing "[DIW Records DIW-916]" are the label and
+    # its catalogue number, which no album is called
     name = re.sub(r"\s*\{[^}]*\}\s*", " ", name)
+    name = re.sub(r"\s*\[[^\]]*\]\s*$", "", name)
     for _ in range(4):
         stripped = AUDIO_TAG_TAIL.sub(
             "", AUDIO_TAG_BRACKET.sub(" ", name)).strip(STRIP_CHARS + ")]}")
         if stripped == name:
             break
         name = stripped
+    m = AUDIO_CUT.search(name)
+    if m and name[:m.start()].strip(STRIP_CHARS):
+        name = name[:m.start()]
     name = DISC_COUNT.sub(" ", name)
-    return re.sub(r"\s{2,}", " ", EMPTY_PARENS.sub(" ", name)).strip(
+    name = re.sub(r"\s{2,}", " ", EMPTY_PARENS.sub(" ", name)).strip(
         STRIP_CHARS)
+    # Stripping junk off the end can eat a closing bracket the title needed
+    return name + ")" * (name.count("(") - name.count(")"))
 
 
 def split_artist_album(name, default_artist=None):
@@ -301,7 +320,16 @@ def split_artist_album(name, default_artist=None):
         if stripped == name:
             break
         name = stripped
-    name = clean_audio_tags(YEAR_SPAN.sub(r"\1", re.sub(r"[_]+", " ", name)))
+    name = re.sub(r"[_]+", " ", name)
+    stamp = DATE_STAMP.search(name)
+    if stamp:
+        name = name[:stamp.start()] + stamp.group(1) + name[stamp.end():]
+    name = clean_audio_tags(YEAR_SPAN.sub(r"\1", name))
+    # "1996-Godspelized" glues the year on with no space, so the dash split
+    # below never sees it and the year ends up inside the album name
+    year_pfx = re.match(r"^\(?((?:19|20)\d{2})\)?\s*[-–—.]\s*(?=\S)", name)
+    if year_pfx:
+        name = name[year_pfx.end():]
     segs = [s.strip(STRIP_CHARS) for s in DASH_SPLIT.split(name)]
     segs = [s for s in segs if s]
     if not segs:
@@ -312,8 +340,14 @@ def split_artist_album(name, default_artist=None):
         # A trailing parenthetical on the artist is a sideman list, not part
         # of the name — without this every quartet becomes its own artist
         artist = re.sub(r"\s*\([^)]*\)\s*$", "", artist).strip() or artist
-    year = None
-    if segs and BARE_YEAR.match(segs[0]):
+        # "David S. Ware, Cooper-Moore, William Parker" is a credit list, and
+        # filing each line-up separately scatters one artist's catalogue. A
+        # one-word head is a band ("Earth, Wind & Fire") and is left alone.
+        head = artist.split(",")[0].strip()
+        if "," in artist and len(head.split()) > 1:
+            artist = head
+    year = int(year_pfx.group(1)) if year_pfx else None
+    if year is None and segs and BARE_YEAR.match(segs[0]):
         year = int(BARE_YEAR.match(segs.pop(0)).group(1))
     album = " - ".join(segs).strip(STRIP_CHARS) or None
     if album and year is None:
@@ -323,6 +357,10 @@ def split_artist_album(name, default_artist=None):
             album = (album[:m.start()] + " " + album[m.end():]).strip(
                 STRIP_CHARS)
     if album:
+        # A second year is the reissue date; the recording date already won
+        album = REISSUE_YEAR.sub(" ", album)
+        if year is not None:
+            album = TRAILING_YEAR.sub("", album)
         album = clean_audio_tags(album) or None
     return artist or default_artist, album, year
 
