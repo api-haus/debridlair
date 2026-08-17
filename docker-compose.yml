@@ -5,6 +5,10 @@ services:
     restart: unless-stopped
     pull_policy: always
     stop_grace_period: 30s
+    # CPU caps (docker --cpus): nothing in this stack may eat the box at
+    # idle. Emby gets the one big allowance; see its service. 24 threads
+    # total, so 12.0 = 50%.
+    cpus: 2.0
     devices:
       - /dev/fuse
     cap_add:
@@ -55,6 +59,7 @@ services:
     container_name: torbox-sync
     restart: unless-stopped
     user: "1000:1000"
+    cpus: 1.0
     environment:
       # torbox_watch reaches Prowlarr by service name; the published port on
       # the host is not localhost from in here.
@@ -93,6 +98,7 @@ services:
              exec python3 /scripts/cueslice.py"
     environment:
       PORT: "8099"
+    cpus: 2.0
     volumes:
       - ./scripts:/scripts:ro
       - ./sync-state:/sync-state
@@ -110,6 +116,7 @@ services:
     image: linuxserver/prowlarr:latest
     container_name: prowlarr
     restart: unless-stopped
+    cpus: 2.0
     ports:
       - "9696:9696"
     environment:
@@ -123,6 +130,10 @@ services:
     image: ghcr.io/flaresolverr/flaresolverr:latest
     container_name: flaresolverr
     restart: unless-stopped
+    # Hard cap: headless Chrome answering a Cloudflare challenge once ate 17
+    # cores mid-game (2026-08, see HANDOFF-gamemode.md). 2 is plenty for
+    # challenge solving.
+    cpus: 2.0
     environment:
       LOG_LEVEL: info
       TZ: Europe/Kiev
@@ -154,6 +165,9 @@ services:
     image: emby/embyserver:4.8.11.0
     container_name: emby
     restart: unless-stopped
+    # The one service allowed real CPU: transcoding. Capped at half the box
+    # (12 of 24 threads) so a transcode can never starve a game or the host.
+    cpus: 12.0
     depends_on:
       torbox-mount:
         condition: service_healthy
