@@ -182,9 +182,16 @@ A large one-off batch (a whole filmography, several seasons at once) can also
 trigger this, movies included, not just `torbox_disco.py` drains. When a batch
 you queue lands during or near a cooldown, check `/user/me` and write anything
 still not confirmed in Emby to `sync-state/cooldown.md` — item, torrent id,
-state, and the cooldown's `until`. That file is what answers "did it land yet"
-or "when does the cooldown lift" later in the day without re-deriving it; prune
-a row once the item shows up in Emby.
+state, and the cooldown's `until`.
+
+**`sync-state/cooldown.md` is the standing log for anything left needing later
+attention, not only Torbox cooldowns.** A batch stalled behind a cooldown, a
+search that died mid-run because the discovery stack went down for gamemode, a
+torrent stuck with no seeds, a wrong-match queued and deleted and still owed a
+retry — any of these gets a row the moment you notice it, not only once a
+batch finishes. That is what lets the next check (later in this session, or a
+future one) pick the work back up instead of re-deriving what was already
+owed. Prune a row once the item shows up in Emby or the situation resolves.
 
 An indexer that matches nothing answers with whatever is popular rather than
 an empty list, so the tool keeps only releases whose title carries the artist
@@ -475,7 +482,9 @@ tidy up, because that is the resume point. Full detail in `docs/dubbing.md`.
 - `scripts/` — torbox_sync.py, torbox_find.py, torbox_disco.py, torbox_add.py,
   emby_setup.py, emby_probe.py, emby_subs.py
 - `sync-state/emby_api_key` — Emby API key
-- `sync-state/cooldown.md` — Torbox cooldown status and what's still landing
+- `sync-state/cooldown.md` — standing log of unfinished acquisition work
+  needing later attention: Torbox cooldowns, stalled torrents, batches
+  interrupted by a gamemode-paused discovery stack, anything still owed
 - Skip-intro pipeline: StrmAssistant fingerprint task daily 03:47, native
   Detect Episode Intros 05:33. New episodes get markers within ~a day.
 
