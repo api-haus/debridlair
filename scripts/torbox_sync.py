@@ -142,6 +142,17 @@ SHOW_ALIASES = {
     "yani neko": "Chainsmoker Cat",
     "dcs legends of tomorrow": "DC's Legends of Tomorrow",
     "legends of tomorrow": "DC's Legends of Tomorrow",
+    # LOTR EE bonus discs: each CD's own season number is already in its episode token.
+    "lotr cd 1 - the appendices -  fotr - from book to": "The Lord of the Rings - The Appendices",
+    "lotr cd 2 - the appendices -  fotr - from book to": "The Lord of the Rings - The Appendices",
+    "lotr cd 3 - the appendices -  ttt - the journey continues  - doc": "The Lord of the Rings - The Appendices",
+    "lotr cd 3 - the appendices -  ttt - the journey continues  - extra": "The Lord of the Rings - The Appendices",
+    "lotr cd 4 - the appendices -  ttt - the battle for middle-earth begins - doc": "The Lord of the Rings - The Appendices",
+    "lotr cd 4 - the appendices -  ttt - the battle for middle-earth begins - extra": "The Lord of the Rings - The Appendices",
+    "lotr cd 5 - the appendices -  rotk - the war of the ring - doc": "The Lord of the Rings - The Appendices",
+    "lotr cd 5 - the appendices -  rotk - the war of the ring - extra": "The Lord of the Rings - The Appendices",
+    "lotr cd 6 - the appendices -  rotk - the passing of an age - doc": "The Lord of the Rings - The Appendices",
+    "lotr cd 6 - the appendices -  rotk - the passing of an age - extra": "The Lord of the Rings - The Appendices",
 }
 # "<Show> OVA"/"<Show> Specials" is season 0 of the parent (docs/library.md)
 SPECIALS_SUFFIX = re.compile(r"\s*[-–:]?\s*\b(?:ovas?|specials?)\b\s*$", re.I)
