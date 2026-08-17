@@ -178,6 +178,14 @@ fits and writes the rest to `sync-state/album_queue.tsv`; `--drain` runs
 hourly from the `torbox-sync` loop and sends the next few as slots free. Do
 not work around this by adding torrents in a shell loop.
 
+A large one-off batch (a whole filmography, several seasons at once) can also
+trigger this, movies included, not just `torbox_disco.py` drains. When a batch
+you queue lands during or near a cooldown, check `/user/me` and write anything
+still not confirmed in Emby to `sync-state/cooldown.md` — item, torrent id,
+state, and the cooldown's `until`. That file is what answers "did it land yet"
+or "when does the cooldown lift" later in the day without re-deriving it; prune
+a row once the item shows up in Emby.
+
 An indexer that matches nothing answers with whatever is popular rather than
 an empty list, so the tool keeps only releases whose title carries the artist
 name. A query in the wrong script came back as 82 audiobooks.
@@ -457,9 +465,17 @@ tidy up, because that is the resume point. Full detail in `docs/dubbing.md`.
 
 - `docker-compose.yml` — emby, torbox-mount (rclone WebDAV FUSE),
   torbox-sync (15-min loop), prowlarr, flaresolverr, cueslice
+- `scripts/gamemode-hook.sh` — wired into `~/.config/gamemode.ini [custom]`.
+  On game start it stops flaresolverr/prowlarr/torbox-sync/cueslice (Emby and
+  torbox-mount stay up for streaming); on game end it starts them again.
+  Log: `sync-state/gamemode-hook.log`. Every service also has a hard `cpus:`
+  cap in the compose file — 12 for emby (half the box, for transcoding), 2
+  for torbox-mount/cueslice/prowlarr/flaresolverr, 1 for torbox-sync — so
+  nothing can saturate the CPU even outside gamemode.
 - `scripts/` — torbox_sync.py, torbox_find.py, torbox_disco.py, torbox_add.py,
   emby_setup.py, emby_probe.py, emby_subs.py
 - `sync-state/emby_api_key` — Emby API key
+- `sync-state/cooldown.md` — Torbox cooldown status and what's still landing
 - Skip-intro pipeline: StrmAssistant fingerprint task daily 03:47, native
   Detect Episode Intros 05:33. New episodes get markers within ~a day.
 
