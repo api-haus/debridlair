@@ -131,6 +131,35 @@ def register_premiere(token, key):
               "Dashboard -> Emby Premiere", file=sys.stderr)
 
 
+def set_language_preferences(token, lang="eng"):
+    """Preferred audio and subtitle language, for every user.
+
+    Emby resolves DefaultAudioStreamIndex and DefaultSubtitleStreamIndex
+    server-side from these and the clients play whatever it names, so this is
+    the only place the choice has to be made. With AudioLanguagePreference
+    unset, a release whose default track is Spanish plays in Spanish.
+    PlayDefaultAudioTrack has to stay off or the container's default flag wins
+    over the preference it exists to override.
+
+    Emby never auto-selects image-based subtitles (PGS) whatever this says.
+    Only text ones — subrip, ass — are picked up.
+    """
+    want = {
+        "AudioLanguagePreference": lang,
+        "SubtitleLanguagePreference": lang,
+        "SubtitleMode": "Always",
+        "PlayDefaultAudioTrack": False,
+    }
+    for user in req("GET", "/Users", token=token):
+        cfg = user.get("Configuration", {})
+        if all(cfg.get(k) == v for k, v in want.items()):
+            print(f"language preferences already {lang} for '{user['Name']}'")
+            continue
+        cfg.update(want)
+        req("POST", f"/Users/{user['Id']}/Configuration", cfg, token=token)
+        print(f"language preferences set to {lang} for '{user['Name']}'")
+
+
 def get_libraries(token):
     return req("GET", "/Library/VirtualFolders", token=token)
 
@@ -224,6 +253,7 @@ def main():
     run_wizard(env)
     token, _uid = authenticate(env)
     register_premiere(token, env.get("EMBY_PREMIERE_KEY", ""))
+    set_language_preferences(token)
 
     api_key = ensure_api_key(token)
     state_dir = ENV_FILE.parent / "sync-state"
