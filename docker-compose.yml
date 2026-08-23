@@ -162,7 +162,7 @@ services:
     command: sh /throttle.sh
 
   emby:
-    image: emby/embyserver:4.8.11.0
+    image: emby/embyserver:4.9.5.0
     container_name: emby
     restart: unless-stopped
     # The one service allowed real CPU: transcoding. Capped at half the box
