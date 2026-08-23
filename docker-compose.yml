@@ -181,7 +181,10 @@ services:
     environment:
       UID: "1000"
       GID: "1000"
-      GIDLIST: "985,989,1003"
+      # The host's own gids for /dev/dri — video and render — because the
+      # container joins the host's device nodes and gids are per-machine.
+      # Named in .env; .env.example says how to find them.
+      GIDLIST: "${EMBY_GIDLIST:-}"
       TZ: Europe/Kiev
     volumes:
       - ./emby:/config
