@@ -105,7 +105,7 @@ the old torrent per the Torbox-deletes rule below once the new one lands).
 ## Add a movie or series by name (the common request)
 
 ```bash
-cd /mnt/archive4/DEBRID
+cd /stash/DEBRID
 python3 scripts/torbox_find.py "Sinners 2025"          # movies: auto-pick best release
 python3 scripts/torbox_find.py "The Pitt S01" --tv     # series: pass --tv
 python3 scripts/torbox_find.py "Title" --list          # show top 10 releases first

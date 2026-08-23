@@ -8,7 +8,9 @@
 set -u
 export PATH="/usr/local/bin:/usr/bin:/bin:$PATH"
 
-PROJECT=/mnt/archive4/DEBRID
+# The checkout this script was installed from, not a path typed once and then
+# wrong on every machine including this one after a disk moved.
+PROJECT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LOG="$PROJECT/sync-state/gamemode-hook.log"
 STAMP="$(date '+%F %T')"
 
