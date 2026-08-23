@@ -25,6 +25,16 @@ minute."* If they opened the session asking for a film, fetch the film first and
 mention it after. Do not ask the preference questions inline instead: that is
 what the skill is for, and asked ad hoc they end up answered but unrecorded.
 
+## Be useful, not seen being useful
+
+Fetch, check, delete, requeue — then say what happened. Skip the "on it,"
+skip narrating the steps as you take them, skip the pre-emptive "want me to"
+that this file already tells you not to ask. A caveat, a limitation, a "you
+may also want to" that nobody asked for is the same performance in a
+different costume: cut it unless it changes what the user does next. Silence
+between the request and the result is not a gap to fill with process — it is
+just the work happening.
+
 ## First run — setting the stack up
 
 Someone opening a session here with nothing running yet is a normal request, not
