@@ -208,6 +208,47 @@ def enable_intro_detection(token):
                   f"{[(k, opts[k]) for k in marker_keys]}")
 
 
+MOVIE_TYPE_OPTIONS = [{
+    "Type": "Movie",
+    "MetadataFetchers": ["TheMovieDb", "OMDb"],
+    "MetadataFetcherOrder": ["TheMovieDb", "OMDb"],
+    "ImageFetchers": ["TheMovieDb", "Fanart.tv"],
+    "ImageFetcherOrder": ["TheMovieDb", "Fanart.tv"],
+}]
+
+TVSHOW_TYPE_OPTIONS = [
+    {"Type": t,
+     "MetadataFetchers": ["TheTVDB", "TheMovieDb"],
+     "MetadataFetcherOrder": ["TheTVDB", "TheMovieDb"],
+     "ImageFetchers": ["TheTVDB", "TheMovieDb"] + (["Fanart.tv"] if t == "Series" else []),
+     "ImageFetcherOrder": ["TheTVDB", "TheMovieDb"] + (["Fanart.tv"] if t == "Series" else [])}
+    for t in ("Series", "Season", "Episode")
+]
+
+
+def ensure_metadata_fetchers(token):
+    """Emby 4.9 treats an empty TypeOptions as "no fetchers enabled" instead
+    of "use defaults" (4.8.11's behavior) — every movie/tvshows library needs
+    its fetchers spelled out explicitly or online metadata silently stops."""
+    for lib in get_libraries(token):
+        coll_type = lib.get("CollectionType")
+        if coll_type == "movies":
+            wanted = MOVIE_TYPE_OPTIONS
+        elif coll_type == "tvshows":
+            wanted = TVSHOW_TYPE_OPTIONS
+        else:
+            continue
+        opts = lib.get("LibraryOptions", {})
+        if opts.get("TypeOptions") == wanted:
+            print(f"metadata fetchers already set on '{lib['Name']}'")
+            continue
+        opts["TypeOptions"] = wanted
+        q = urllib.parse.urlencode({"refreshLibrary": "false"})
+        req("POST", f"/Library/VirtualFolders/LibraryOptions?{q}",
+            {"Id": lib["ItemId"], "LibraryOptions": opts}, token=token)
+        print(f"metadata fetchers set on '{lib['Name']}' ({coll_type})")
+
+
 def install_strmassistant():
     """Install the StrmAssistant plugin (STRM intro-skip unlock) + config."""
     import os
@@ -267,6 +308,7 @@ def main():
     add_library(token, "Torbox (raw)", "mixed", ["/media/torbox"])
 
     enable_intro_detection(token)
+    ensure_metadata_fetchers(token)
 
     # general perf/analysis friendly settings
     req("POST", "/System/Configuration", {
