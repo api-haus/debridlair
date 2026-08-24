@@ -421,6 +421,28 @@ tidy up, because that is the resume point. Full detail in `docs/dubbing.md`.
   `docker compose up -d emby-throttle`; check with
   `tc -s qdisc show dev br-debrid`. Shaping the bridge rather than each veth
   is deliberate — per-veth caps give every container its own 40 Mbit.
+- **A release fitting under the cap is not the same as a release that streams
+  well under it.** `torbox_find.py`'s size ceilings are proxies for bitrate at
+  search time (no runtime known yet), so a 2160p HDR release can still land
+  at 30+ Mbit/s and buffer even though it passed the GB check. `scripts/
+  bitrate_audit.py` reads each item's *actual* probed bitrate back out of
+  Emby's MediaStreams (falling back to size/runtime for anything unprobed)
+  and reports what's over a target ceiling:
+
+  ```bash
+  python3 scripts/bitrate_audit.py --cap 15                    # movies, default
+  python3 scripts/bitrate_audit.py --type all --cap 15         # + episodes
+  ```
+
+  `scripts/bitrate_fix.py` acts on that list: for each offender it searches
+  1080p (then plain) releases, estimates each candidate's bitrate from its
+  size against the item's own runtime, keeps the best-scoring one inside
+  `--lo`/`--hi` (default 10-15 Mbit/s), queues it, and **deletes the
+  superseded torrent immediately** — before that matters, see the dedupe note
+  below. It throttles against Torbox's concurrent-slot limit the same way
+  `torbox_disco.py` does, deferring what doesn't fit to `sync-state/
+  bitrate_queue.tsv`; `--drain` runs from the `torbox-sync` loop alongside
+  the album drain.
 - **`processqueue gpu` is a VRAM budget, and a job must declare its share.**
   One ticket is one GiB. A dub render holds about 10 GiB for a quarter of an
   hour and so asks for 11, counting the CUDA context; the pool is 14 on this
@@ -468,7 +490,11 @@ tidy up, because that is the resume point. Full detail in `docs/dubbing.md`.
   delete and tell the user what was dropped and why, right after.
 - `.strm` layout is normalized by the sync script (show/season parsing,
   quality dedupe for TV). If Emby shows strays or duplicate episodes, the fix
-  belongs in `torbox_sync.py`, not in Emby or on disk.
+  belongs in `torbox_sync.py`, not in Emby or on disk. That dedupe scores by
+  resolution first, so replacing a release with a lower-resolution one (a
+  bitrate fix, say) only sticks if the old torrent is deleted *before* the
+  next sync — otherwise the sync sees both, scores the old 2160p file higher,
+  and drops your replacement, silently undoing the fix.
 - **The sync only prunes when it got a complete account listing.** Torbox's
   API drops handshakes and serves sporadic 403/520s; a source that fails to
   list makes every `.strm` it backs look stale. `torbox_sync.py` retries, then
@@ -490,7 +516,7 @@ tidy up, because that is the resume point. Full detail in `docs/dubbing.md`.
   for torbox-mount/cueslice/prowlarr/flaresolverr, 1 for torbox-sync — so
   nothing can saturate the CPU even outside gamemode.
 - `scripts/` — torbox_sync.py, torbox_find.py, torbox_disco.py, torbox_add.py,
-  emby_setup.py, emby_probe.py, emby_subs.py
+  emby_setup.py, emby_probe.py, emby_subs.py, bitrate_audit.py, bitrate_fix.py
 - `sync-state/emby_api_key` — Emby API key
 - `sync-state/cooldown.md` — standing log of unfinished acquisition work
   needing later attention: Torbox cooldowns, stalled torrents, batches

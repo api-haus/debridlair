@@ -73,6 +73,7 @@ services:
         i=$$((i+1));
         [ $$((i % 4)) -ne 0 ] || python3 /scripts/torbox_watch.py || true;
         [ $$((i % 4)) -ne 0 ] || python3 /scripts/torbox_disco.py --drain || true;
+        [ $$((i % 4)) -ne 0 ] || python3 /scripts/bitrate_fix.py --drain || true;
         sleep 780;
       done"
     volumes:
@@ -154,7 +155,7 @@ services:
       - torbox-mount
       - prowlarr
     environment:
-      RATE: 40mbit
+      RATE: 20mbit
       BRIDGE: br-debrid
     volumes:
       - ./scripts/throttle.sh:/throttle.sh:ro
