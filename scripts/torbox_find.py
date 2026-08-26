@@ -270,7 +270,7 @@ def main():
         sys.exit(f"pick 1-{min(len(results), 10)}")
     r = results[n]
     why = over_limit(r, music, allow_lossy)
-    if why:
+    if why and "--allow-fat" not in flags:
         sys.exit(f"refusing: {r.get('title')} exceeds the 40 Mbit streamability "
                  f"cap ({why}); pick another or use --allow-fat")
     queue(r)
