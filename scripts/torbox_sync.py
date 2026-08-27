@@ -139,6 +139,7 @@ TITLE_OVERRIDES = {
 # English broadcast name). Without this the same show lands in two folders and
 # the per-episode quality dedupe never sees the duplicates as duplicates.
 SHOW_ALIASES = {
+    "fumetsu no anata e": "To Your Eternity",
     "yani neko": "Chainsmoker Cat",
     "dcs legends of tomorrow": "DC's Legends of Tomorrow",
     "legends of tomorrow": "DC's Legends of Tomorrow",
@@ -684,6 +685,7 @@ def collect(kind, key):
                 is_tv = TV_PAT.search(f["name"]) is not None
                 if is_tv:
                     show_dir = clean_show(item_name) or item_name
+                    show_dir = SHOW_ALIASES.get(show_dir.lower(), show_dir)
                     # An NCOP/NCED with no episode number still sits in a
                     # season folder; a raw one reads as a phantom season
                     season_dir = None
