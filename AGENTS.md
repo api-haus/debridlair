@@ -485,6 +485,36 @@ tidy up, because that is the resume point. Full detail in `docs/dubbing.md`.
   release that violates a preference can still win. Whatever the script does
   not enforce, you enforce — requeue a compliant release and drop the other
   rather than handing the user a choice they have already made in `PREFS.md`.
+- **Prefer a cached release over an uncached one whenever both clear the same
+  bar.** `score()` in `torbox_find.py` ranks by resolution/HDR/seeders only —
+  it has no idea whether Torbox already holds the file, so it will happily
+  reach for an uncached release that outranks a cached one by a seeder or two.
+  A cached hit lands in seconds and costs no download slot; an uncached one
+  takes a slot and, in a burst, is what earns the day-long cooldown described
+  above — and a cooldown blocks new *uncached* adds only, so a cached release
+  still queues and lands during one (confirmed live: `cooldown_until` in the
+  future, `POST /torrents/createtorrent` still succeeds and shows
+  `download_state: cached` on a hash checked-cached).
+
+  Check before queuing:
+
+  ```bash
+  curl -s "https://api.torbox.app/v1/api/torrents/checkcached?hash=HASH1,HASH2&format=list" \
+    -H "Authorization: Bearer $TORBOX_API_KEY" -H "User-Agent: debrid-emby-stack/1.0"
+  ```
+
+  (no `User-Agent` and Cloudflare answers a bare `403` that looks like an auth
+  failure and is not one — same trap as the delete/controltorrent call below).
+  A non-empty `data` list means cached; empty means not. `hash` is the
+  infohash: Knaben and The Pirate Bay carry it as `infoHash` straight in the
+  Prowlarr search result, LimeTorrents doesn't expose it and needs
+  `resolve_grab()` run first so you can pull the `btih` out of the resulting
+  magnet. Queue the best-scoring release that comes back cached; only reach
+  for an uncached one when nothing cached meets the size/quality/language
+  bar. `bitrate_fix.py`/`torbox_disco.py`'s `free_slots()` gate doesn't make
+  this distinction either — it defers a cached candidate exactly like an
+  uncached one whenever the account is in cooldown, so a `--drain` run during
+  a cooldown can sit on a fix that would have gone through instantly.
 - Torbox deletes: `POST /v1/api/torrents/controltorrent`
   `{"torrent_id": N, "operation": "delete"}` — irreversible. Do not ask first;
   delete and tell the user what was dropped and why, right after.
