@@ -10,10 +10,14 @@ Usage:
     python3 torbox_find.py "Sinners 2025" --allow-fat # include over-cap releases
     python3 torbox_find.py "Album" --music --allow-lossy   # accept MP3 etc.
 
-Releases that can never stream within the 40 Mbit emby throttle (remuxes,
+Releases that can never stream within the 20 Mbit emby throttle (remuxes,
 movies >30 GB, episodes >12 GB, packs >80 GB) are refused by default.
 Under --music a lossy release is refused the same way, and a track-split rip
 outranks a single-file CUE image, which Emby plays as one long track.
+
+Among the top candidates, a release Torbox already has cached outranks an
+otherwise-similar uncached one (cached lands in seconds and costs no
+download slot; uncached risks the account cooldown) — see checkcached().
 
 After queuing, the torbox-sync loop (15 min) writes the .strm files and Emby
 picks the title up automatically.
@@ -74,8 +78,59 @@ def prowlarr(path, key):
     return json.load(urllib.request.urlopen(req, timeout=60))
 
 
-# Streamability limits: the emby container is throttled to 40 Mbit
-# (= 18 GB/hour), so anything fatter can never play back smoothly.
+BTIH = re.compile(r"btih:([a-fA-F0-9]{40})", re.I)
+CACHE_CHECK_LIMIT = 20  # how many top-ranked candidates get a cache lookup
+CACHE_BONUS = 500       # < one resolution tier (1000), > seeder cap (500)
+
+
+def info_hash(r):
+    """The release's infohash, from Prowlarr's field or a magnet URI."""
+    ih = r.get("infoHash")
+    if ih:
+        return ih.upper()
+    m = BTIH.search(r.get("magnetUrl") or "")
+    return m.group(1).upper() if m else None
+
+
+def checkcached(hashes, key):
+    """Which of these infohashes Torbox already holds cached."""
+    if not hashes:
+        return set()
+    q = urllib.parse.urlencode([("hash", ",".join(hashes)), ("format", "list")])
+    req = urllib.request.Request(
+        f"https://api.torbox.app/v1/api/torrents/checkcached?{q}",
+        headers={"Authorization": f"Bearer {key}",
+                 "User-Agent": "debrid-emby-stack/1.0"})
+    data = json.load(urllib.request.urlopen(req, timeout=30))
+    return {d["hash"].upper() for d in (data.get("data") or [])}
+
+
+def annotate_cached(results, torbox_key, score_fn=None, limit=CACHE_CHECK_LIMIT):
+    """Mark the top `limit` candidates r['cached'] and re-rank in their
+    favor. Bounded to a slice because LimeTorrents results carry no
+    infoHash and would need a resolve_grab() round-trip per release to get
+    one; checking every result would be one HTTP call per candidate."""
+    score_fn = score_fn or score
+    if not torbox_key:
+        return results
+    top = results[:limit]
+    hashes = {id(r): info_hash(r) for r in top}
+    hashes = {k: v for k, v in hashes.items() if v}
+    cached = checkcached(set(hashes.values()), torbox_key)
+    for r in top:
+        r["cached"] = hashes.get(id(r)) in cached
+    results[:limit] = sorted(
+        top, key=lambda r: score_fn(r) + (CACHE_BONUS if r.get("cached") else 0),
+        reverse=True)
+    return results
+
+
+def torbox_key():
+    return load_env().get("TORBOX_API_KEY")
+
+
+# Streamability limits: the emby container is throttled to 20 Mbit
+# (= 9 GB/hour), so anything fatter can never play back smoothly.
 # Runtimes aren't known at search time, so these are conservative proxies.
 EP_MAX = 12e9        # single episode  (~45-60 min)
 MOVIE_MAX = 30e9     # movie           (~1.5-2.5 h)
@@ -214,15 +269,18 @@ def search(query, tv=True, allow_fat=False, key=None, music=False,
             return over_limit(r, music, allow_lossy)
         fat = [r for r in results if bad(r)]
         results = [r for r in results if not bad(r)]
-    results.sort(key=music_score if music else score, reverse=True)
+    score_fn = music_score if music else score
+    results.sort(key=score_fn, reverse=True)
+    results = annotate_cached(results, torbox_key(), score_fn)
     return results, fat
 
 
 def queue(r):
     """Send one release to Torbox."""
     grab = resolve_grab(r.get("magnetUrl") or r.get("downloadUrl"))
+    cached = " [cached]" if r.get("cached") else ""
     print(f"queuing: {r.get('title')} "
-          f"({(r.get('size') or 0)/1e9:.1f} GB, {r.get('seeders')} seeds)")
+          f"({(r.get('size') or 0)/1e9:.1f} GB, {r.get('seeders')} seeds){cached}")
     add = Path(__file__).with_name("torbox_add.py")
     subprocess.run([sys.executable, str(add), grab], check=True)
 
@@ -253,7 +311,7 @@ def main():
                   f"(remux / >{int(EP_MAX//1e9)} GB ep / >{int(MOVIE_MAX//1e9)} GB movie / "
                   f">{int(PACK_MAX//1e9)} GB pack; --allow-fat to include)", file=sys.stderr)
         if not results:
-            sys.exit(f"nothing streamable within the 40 Mbit cap for {query!r}; "
+            sys.exit(f"nothing streamable within the 20 Mbit cap for {query!r}; "
                      f"re-run with --allow-fat to see everything")
     if not results:
         sys.exit(f"no results with magnets for {query!r}")
@@ -261,8 +319,9 @@ def main():
         for i, r in enumerate(results[:10], 1):
             why = over_limit(r, music, allow_lossy)
             mark = f" [over cap: {why}]" if why else ""
+            cached = " [cached]" if r.get("cached") else ""
             print(f"{i:2d}. [{r.get('indexer')}] {r.get('seeders')} seeds, "
-                  f"{(r.get('size') or 0)/1e9:.1f} GB | {r.get('title')}{mark}")
+                  f"{(r.get('size') or 0)/1e9:.1f} GB | {r.get('title')}{mark}{cached}")
         if pick is None:
             return
     n = (pick or 1) - 1
@@ -271,7 +330,7 @@ def main():
     r = results[n]
     why = over_limit(r, music, allow_lossy)
     if why and "--allow-fat" not in flags:
-        sys.exit(f"refusing: {r.get('title')} exceeds the 40 Mbit streamability "
+        sys.exit(f"refusing: {r.get('title')} exceeds the 20 Mbit streamability "
                  f"cap ({why}); pick another or use --allow-fat")
     queue(r)
 
