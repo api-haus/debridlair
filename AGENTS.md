@@ -415,12 +415,12 @@ tidy up, because that is the resume point. Full detail in `docs/dubbing.md`.
   create/prune files to match Torbox. Change the script, then run it.
 - **Don't `DELETE /Library/VirtualFolders`** on this Emby build — it 500s.
 - Emby is pinned to 4.8.11 (4.9 scan regressions + StrmAssistant compat).
-- The **whole stack** shares one 40 Mbit download cap: a `tc tbf` on the
+- The **whole stack** shares one 20 Mbit download cap: a `tc tbf` on the
   `br-debrid` bridge, applied by `emby-throttle` (`scripts/throttle.sh`,
-  `RATE`/`BRIDGE` env in compose). Re-apply with
+  `RATE`/`BRIDGE` env in compose, currently `20mbit`). Re-apply with
   `docker compose up -d emby-throttle`; check with
   `tc -s qdisc show dev br-debrid`. Shaping the bridge rather than each veth
-  is deliberate — per-veth caps give every container its own 40 Mbit.
+  is deliberate — per-veth caps give every container its own 20 Mbit.
 - **A release fitting under the cap is not the same as a release that streams
   well under it.** `torbox_find.py`'s size ceilings are proxies for bitrate at
   search time (no runtime known yet), so a 2160p HDR release can still land
@@ -430,14 +430,15 @@ tidy up, because that is the resume point. Full detail in `docs/dubbing.md`.
   and reports what's over a target ceiling:
 
   ```bash
-  python3 scripts/bitrate_audit.py --cap 15                    # movies, default
+  python3 scripts/bitrate_audit.py --cap 15                    # movies, tool default; PREFS.md sets 12 for this user
   python3 scripts/bitrate_audit.py --type all --cap 15         # + episodes
   ```
 
   `scripts/bitrate_fix.py` acts on that list: for each offender it searches
   1080p (then plain) releases, estimates each candidate's bitrate from its
   size against the item's own runtime, keeps the best-scoring one inside
-  `--lo`/`--hi` (default 10-15 Mbit/s), queues it, and **deletes the
+  `--lo`/`--hi` (tool default 10-15 Mbit/s; `PREFS.md` sets 8-12 for this
+  user), queues it, and **deletes the
   superseded torrent immediately** — before that matters, see the dedupe note
   below. It throttles against Torbox's concurrent-slot limit the same way
   `torbox_disco.py` does, deferring what doesn't fit to `sync-state/
@@ -475,7 +476,7 @@ tidy up, because that is the resume point. Full detail in `docs/dubbing.md`.
   what it claims in `df` for the same reason: WebDAV reports no quota, so
   rclone advertises 1 PB free and space-aware tools believe it.
 - Only acquire content through `torbox_find.py` — it enforces the
-  streamability limits that match the 40 Mbit cap, and the language policy, at
+  streamability limits that match the 20 Mbit cap, and the language policy, at
   acquisition time (the ceilings themselves are `EP_MAX`/`MOVIE_MAX`/`PACK_MAX`
   at the top of that script, and `PREFS.md` is what says what they should be).
   Do not bypass with `--allow-fat` or raw magnets unless the user explicitly
