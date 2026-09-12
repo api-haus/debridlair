@@ -11,6 +11,7 @@ PREFS.md
 # a file inside it.
 sync-state/*
 !sync-state/watchlist.example.txt
+!sync-state/movie_watchlist.example.txt
 
 # Runtime state / generated
 emby/

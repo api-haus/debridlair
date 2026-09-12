@@ -1,0 +1,17 @@
+# Movies (or a season premiere) not worth fetching yet: not released, or
+# nothing indexed at webrip-or-better quality when last checked. One search
+# query per line, same query you'd hand torbox_find.py. A line ending in
+# " --tv" searches TV categories instead of movie ones — use it for a
+# premiere episode that hasn't aired:
+#
+#     Resident Evil 2026
+#     Slow Horses S06E01 --tv
+#
+# scripts/movie_watch.py runs this hourly from the torbox-sync loop. It
+# refuses CAM/TELESYNC/R5/screener/workprint releases (the leak that shows
+# up days before a real one) and leaves the line in place until something
+# at WEBRip or better appears, then queues it and drops the line.
+#
+# Copy this to movie_watchlist.txt, which is gitignored like watchlist.txt —
+# what you're waiting for is yours, not shared doctrine. Blank lines and
+# lines starting with # are ignored.

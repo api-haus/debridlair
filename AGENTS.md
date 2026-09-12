@@ -309,6 +309,24 @@ season — that is what lets it also catch a *new* season premiering. Add a
 line whenever the user asks to "watch" or follow an ongoing show, and drop
 one when a show ends.
 
+## Watching for a movie that isn't out yet, or not yet at decent quality
+
+`sync-state/movie_watchlist.txt` lists one `torbox_find.py` query per line —
+`Resident Evil 2026`, or `Slow Horses S06E01 --tv` for a premiere episode
+that hasn't aired — for anything that has nothing indexed yet, or nothing
+above a CAM/TELESYNC/R5/screener leak. `torbox_find.py`'s own auto-pick does
+not know those tiers from a real release and will happily queue one on
+seeders alone (confirmed: a day-old TELESYNC outranked every legitimate copy
+of a release). `sync-state/movie_watchlist.example.txt` is the tracked
+template; copy it if there is no watchlist yet.
+
+`scripts/movie_watch.py` runs hourly from the same `torbox-sync` loop as
+`torbox_watch.py`. It refuses that low tier, queues the best release once a
+real one appears (cooldown/slot-aware, same `free_slots()` as
+`torbox_disco.py --drain`), and drops the line. Add a line whenever a search
+for a specific title comes back with nothing streamable, or with nothing
+better than a cam/telesync — don't just report that and leave it there.
+
 ## Dubbing a show that was never dubbed
 
 Some shows only ever got subs. `scripts/dub_*.py` builds an English track for
