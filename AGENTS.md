@@ -114,6 +114,10 @@ the old torrent per the Torbox-deletes rule below once the new one lands).
 
 ## Add a movie or series by name (the common request)
 
+On this host mise's Python has no CA bundle, so the Torbox cache check dies with
+`CERTIFICATE_VERIFY_FAILED`. Prefix host runs with
+`SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt`.
+
 ```bash
 cd /stash/DEBRID
 python3 scripts/torbox_find.py "Sinners 2025"          # movies: auto-pick best release
