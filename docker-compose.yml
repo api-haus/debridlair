@@ -145,24 +145,6 @@ services:
     expose:
       - "8191"
 
-  emby-throttle:
-    image: alpine:3.20
-    container_name: emby-throttle
-    network_mode: host
-    privileged: true
-    restart: "no"
-    depends_on:
-      - emby
-      - torbox-mount
-      - prowlarr
-    environment:
-      RATE: 20mbit
-      BRIDGE: br-debrid
-    volumes:
-      - ./scripts/throttle.sh:/throttle.sh:ro
-    # Shared cap for every container on the bridge. Tweak RATE above.
-    command: sh /throttle.sh
-
   emby:
     image: emby/embyserver:4.9.5.0
     container_name: emby
@@ -206,7 +188,6 @@ services:
       start_period: 60s
 
 networks:
-  # Fixed bridge name so the throttle has a stable device to shape.
   default:
     driver: bridge
     driver_opts:

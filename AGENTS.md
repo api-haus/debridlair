@@ -437,12 +437,8 @@ tidy up, because that is the resume point. Full detail in `docs/dubbing.md`.
   create/prune files to match Torbox. Change the script, then run it.
 - **Don't `DELETE /Library/VirtualFolders`** on this Emby build — it 500s.
 - Emby is pinned to 4.8.11 (4.9 scan regressions + StrmAssistant compat).
-- The **whole stack** shares one 20 Mbit download cap: a `tc tbf` on the
-  `br-debrid` bridge, applied by `emby-throttle` (`scripts/throttle.sh`,
-  `RATE`/`BRIDGE` env in compose, currently `20mbit`). Re-apply with
-  `docker compose up -d emby-throttle`; check with
-  `tc -s qdisc show dev br-debrid`. Shaping the bridge rather than each veth
-  is deliberate — per-veth caps give every container its own 20 Mbit.
+- The stack is **uncapped**: no `tc` shaping on `br-debrid` (owner, 2026-10-17).
+  Streaming runs at whatever Torbox and the uplink give.
 - **A release fitting under the cap is not the same as a release that streams
   well under it.** `torbox_find.py`'s size ceilings are proxies for bitrate at
   search time (no runtime known yet), so a 2160p HDR release can still land

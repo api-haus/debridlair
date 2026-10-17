@@ -21,7 +21,7 @@ case "${1:-}" in
     # One call stops them in parallel; --timeout 5 so gamemode is not kept
     # waiting on a slow container while the game sits on its launcher.
     compose stop --timeout 5 \
-      flaresolverr prowlarr torbox-sync cueslice emby-throttle
+      flaresolverr prowlarr torbox-sync cueslice
     echo "$STAMP start: discovery stack stopped" >> "$LOG"
     ;;
   end)
